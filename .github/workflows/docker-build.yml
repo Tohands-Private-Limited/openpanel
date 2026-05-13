@@ -30,7 +30,9 @@ on:
       - "**/.prettierignore"
 
 env:
-  repo_owner: "openpanel-dev"
+  # ToHands fork: push to this owner's GHCR namespace.
+  # Change to "tohands" once TOHANDS_GHCR_TOKEN secret is configured on this repo.
+  repo_owner: "mraj602-tohands"
 
 jobs:
   lint-and-test:
@@ -154,7 +156,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.TOHANDS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Build and push by digest
         id: build
@@ -216,7 +218,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.TOHANDS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Create manifest list and push
         working-directory: /tmp/digests
@@ -273,7 +275,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.TOHANDS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Build and push by digest
         id: build
@@ -335,7 +337,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.TOHANDS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Create manifest list and push
         working-directory: /tmp/digests
@@ -392,7 +394,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.TOHANDS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Build and push by digest
         id: build
@@ -454,7 +456,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.TOHANDS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Create manifest list and push
         working-directory: /tmp/digests
