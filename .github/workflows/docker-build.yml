@@ -30,9 +30,9 @@ on:
       - "**/.prettierignore"
 
 env:
-  # ToHands fork: push to this owner's GHCR namespace.
-  # Change to "tohands" once TOHANDS_GHCR_TOKEN secret is configured on this repo.
-  repo_owner: "mraj602-tohands"
+  # Pushes to ghcr.io/<repo_owner>/{api,dashboard,worker}.
+  # Lowercase — GHCR image paths are case-normalised.
+  repo_owner: "tohands-private-limited"
 
 jobs:
   lint-and-test:
