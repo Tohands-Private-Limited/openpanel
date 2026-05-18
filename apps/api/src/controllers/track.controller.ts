@@ -98,7 +98,7 @@ export function getTimestamp(
       : undefined;
 
   if (!userDefinedTimestamp) {
-    return { timestamp: safeTimestamp, isTimestampFromThePast: false };
+    return { timestamp: safeTimestamp };
   }
 
   const clientTimestamp = new Date(userDefinedTimestamp);
@@ -106,7 +106,6 @@ export function getTimestamp(
 
   // Constants for time validation
   const ONE_MINUTE_MS = 60 * 1000;
-  const FIFTEEN_MINUTES_MS = 15 * ONE_MINUTE_MS;
   // Hard floor for accepted historical events. Public contract for /track
   // and /track/batch, hard-coded (not per-project configurable).
   const FIVE_DAYS_MS = 5 * 24 * 60 * 60 * 1000;
@@ -116,7 +115,7 @@ export function getTimestamp(
     Number.isNaN(clientTimestampNumber) ||
     clientTimestampNumber > safeTimestamp + ONE_MINUTE_MS
   ) {
-    return { timestamp: safeTimestamp, isTimestampFromThePast: false };
+    return { timestamp: safeTimestamp };
   }
 
   // Reject events older than 5 days. In /track/batch this surfaces as a
@@ -126,14 +125,7 @@ export function getTimestamp(
     throw new HttpError('event timestamp older than 5 days', { status: 400 });
   }
 
-  // isTimestampFromThePast is true only if timestamp is older than 15 minutes
-  const isTimestampFromThePast =
-    clientTimestampNumber < safeTimestamp - FIFTEEN_MINUTES_MS;
-
-  return {
-    timestamp: clientTimestampNumber,
-    isTimestampFromThePast,
-  };
+  return { timestamp: clientTimestampNumber };
 }
 
 interface TrackContext {
@@ -141,7 +133,7 @@ interface TrackContext {
   ip: string;
   ua?: string;
   headers: Record<string, string | undefined>;
-  timestamp: { value: number; isFromPast: boolean };
+  timestamp: { value: number };
   identity?: IIdentifyPayload;
   deviceId: string;
   sessionId: string;
@@ -237,7 +229,6 @@ async function buildEventContext(
     headers: shared.requestHeaders,
     timestamp: {
       value: timestamp.timestamp,
-      isFromPast: timestamp.isTimestampFromThePast,
     },
     identity,
     deviceId: deviceIdResult.deviceId,
@@ -288,7 +279,6 @@ async function handleTrack(
           ...payload,
           groups: payload.groups ?? [],
           timestamp: timestamp.value,
-          isTimestampFromThePast: timestamp.isFromPast,
         },
         uaInfo,
         geo,
