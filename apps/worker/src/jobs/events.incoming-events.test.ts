@@ -26,6 +26,16 @@ vi.mock('@openpanel/db', async () => {
     },
   };
 });
+// Mock the session_start dedup lock so tests don't need a live Redis. By
+// default the lock is acquired (true) so existing tests' session_start
+// expectations still hold; individual tests can override per-call.
+vi.mock('@openpanel/redis', async () => {
+  const actual = await vi.importActual('@openpanel/redis');
+  return {
+    ...actual,
+    getLock: vi.fn().mockResolvedValue(true),
+  };
+});
 
 // 30 minutes
 const SESSION_TIMEOUT = 30 * 60 * 1000;
@@ -79,7 +89,6 @@ describe('incomingEvent', () => {
       event: {
         name: 'test_event',
         timestamp: timestamp.toISOString(),
-        isTimestampFromThePast: false,
         properties: { __path: 'https://example.com/test' },
       },
       uaInfo,
@@ -174,7 +183,6 @@ describe('incomingEvent', () => {
         name: 'test_event',
         timestamp: timestamp.toISOString(),
         properties: { __path: 'https://example.com/test' },
-        isTimestampFromThePast: false,
       },
       headers: {
         'request-id': '123',
@@ -187,11 +195,6 @@ describe('incomingEvent', () => {
       projectId,
       deviceId,
       sessionId: 'session-123',
-      session: {
-        referrer: '',
-        referrerName: '',
-        referrerType: '',
-      },
     };
 
     const changeDelay = vi.fn();
@@ -261,7 +264,6 @@ describe('incomingEvent', () => {
         timestamp: timestamp.toISOString(),
         properties: { custom_property: 'test_value' },
         profileId: 'profile-123',
-        isTimestampFromThePast: false,
       },
       headers: {
         'user-agent': 'OpenPanel Server/1.0',
@@ -366,7 +368,6 @@ describe('incomingEvent', () => {
         timestamp: timestamp.toISOString(),
         properties: { custom_property: 'test_value' },
         profileId: 'profile-123',
-        isTimestampFromThePast: false,
       },
       headers: {
         'user-agent': 'OpenPanel Server/1.0',
@@ -384,6 +385,9 @@ describe('incomingEvent', () => {
 
     expect((createEvent as Mock).mock.calls[0]![0]).toStrictEqual({
       name: 'server_event',
+      // Server event with profileId but no existing session: keep the
+      // API-computed identity instead of blanking deviceId/sessionId.
+      // The fixture sends '' for both so that's what we expect here.
       deviceId: '',
       sessionId: '',
       profileId: 'profile-123',
@@ -410,14 +414,184 @@ describe('incomingEvent', () => {
       duration: 0,
       path: '',
       origin: '',
-      referrer: undefined,
-      referrerName: undefined,
-      referrerType: undefined,
+      // baseEvent fields fall through uniformly when there's no
+      // session enrichment available — empty strings for all referrer
+      // fields rather than the previous mix of undefined/''.
+      referrer: '',
+      referrerName: '',
+      referrerType: '',
       sdkName: 'server',
       sdkVersion: '1.0.0',
       groups: [],
     });
 
     expect(sessionsQueue.add).not.toHaveBeenCalled();
+  });
+
+  it('should emit session_start only once when 3 events arrive in rapid succession', async () => {
+    // Regression test: previously the API baked `session: undefined` into every
+    // payload when no session-end job existed yet. Even with sequential
+    // per-device processing in the worker, the worker re-checks the BullMQ
+    // session-end job at processing time, so events 2 and 3 should extend
+    // rather than emit duplicate session_starts.
+    const spySessionsQueueAdd = vi
+      .spyOn(sessionsQueue, 'add')
+      .mockResolvedValue({} as Job);
+    const spySessionsQueueGetJob = vi.spyOn(sessionsQueue, 'getJob');
+
+    const buildJobData = (
+      eventName: string,
+    ): EventsQueuePayloadIncomingEvent['payload'] => ({
+      geo,
+      event: {
+        name: eventName,
+        timestamp: new Date().toISOString(),
+        properties: { __path: 'https://example.com/test' },
+      },
+      uaInfo,
+      headers: {
+        'request-id': '123',
+        'user-agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'openpanel-sdk-name': 'web',
+        'openpanel-sdk-version': '1.0.0',
+      },
+      projectId,
+      deviceId,
+      sessionId: newSessionId,
+    });
+
+    // Event 1: no session-end job exists yet → emit session_start.
+    spySessionsQueueGetJob.mockResolvedValueOnce(undefined);
+    // Events 2 and 3: session-end job is now present (delayed) → extend only.
+    const liveJob = {
+      id: `sessionEnd:${projectId}:${deviceId}`,
+      getState: vi.fn().mockResolvedValue('delayed'),
+      changeDelay: vi.fn(),
+      data: {
+        type: 'createSessionEnd',
+        payload: {
+          sessionId: newSessionId,
+          deviceId,
+          referrer: '',
+          referrerName: '',
+          referrerType: '',
+        },
+      },
+    } as Partial<Job> as Job;
+    spySessionsQueueGetJob.mockResolvedValue(liveJob);
+
+    (createEvent as Mock).mockImplementation((event) => event);
+
+    await incomingEvent(buildJobData('event_a'));
+    await incomingEvent(buildJobData('event_b'));
+    await incomingEvent(buildJobData('event_c'));
+
+    const sessionStartCalls = (createEvent as Mock).mock.calls.filter(
+      ([arg]) => arg?.name === 'session_start',
+    );
+    expect(sessionStartCalls).toHaveLength(1);
+
+    // Only the first event should have queued a session-end job; subsequent
+    // events extend the existing one via changeDelay.
+    expect(spySessionsQueueAdd).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not emit duplicate session_start when lock is held', async () => {
+    const { getLock } = await import('@openpanel/redis');
+    // Simulate "another worker already claimed session_start" by failing
+    // the lock acquisition. Live event still fires; sessionEnd job is
+    // still scheduled (it's idempotent on jobId).
+    vi.mocked(getLock).mockResolvedValueOnce(false);
+    // No active session-end job exists yet — force getJob to undefined so the
+    // worker falls into the "no active session" branch where the lock check
+    // matters. (vi.clearAllMocks resets call history but keeps implementations
+    // set via mockResolvedValue in previous tests.)
+    vi.spyOn(sessionsQueue, 'getJob').mockResolvedValue(undefined);
+    const spySessionsQueueAdd = vi
+      .spyOn(sessionsQueue, 'add')
+      .mockResolvedValue({} as Job);
+
+    const timestamp = new Date();
+    const jobData: EventsQueuePayloadIncomingEvent['payload'] = {
+      geo,
+      event: {
+        name: 'live_event',
+        timestamp: timestamp.toISOString(),
+        properties: { __path: 'https://example.com/test' },
+      },
+      uaInfo,
+      headers: {
+        'request-id': '123',
+        'user-agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/91.0.4472.124',
+        'openpanel-sdk-name': 'web',
+        'openpanel-sdk-version': '1.0.0',
+      },
+      projectId,
+      deviceId,
+      sessionId: newSessionId,
+    };
+    (createEvent as Mock).mockReturnValue({});
+
+    await incomingEvent(jobData);
+
+    // No session_start emission (lock not acquired)
+    const startCalls = (createEvent as Mock).mock.calls.filter(
+      (call) => call[0]?.name === 'session_start',
+    );
+    expect(startCalls).toHaveLength(0);
+    // Live event itself still gets created
+    const liveCalls = (createEvent as Mock).mock.calls.filter(
+      (call) => call[0]?.name === 'live_event',
+    );
+    expect(liveCalls).toHaveLength(1);
+    // sessionEnd is still scheduled even when lock not acquired (idempotent)
+    expect(spySessionsQueueAdd).toHaveBeenCalled();
+  });
+
+  it('historical event preserves API-computed deviceId/sessionId', async () => {
+    // Event with __timestamp older than SESSION_TIMEOUT (30 min). Worker
+    // should write it with the deviceId/sessionId the API computed,
+    // without scheduling sessionEnd (live state untouched).
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    const jobData: EventsQueuePayloadIncomingEvent['payload'] = {
+      geo,
+      event: {
+        name: 'historical_event',
+        timestamp: oneHourAgo.toISOString(),
+        properties: { __path: 'https://example.com/replay' },
+      },
+      uaInfo,
+      headers: {
+        'request-id': '123',
+        'user-agent':
+          'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15',
+        'openpanel-sdk-name': 'react-native',
+        'openpanel-sdk-version': '1.0.0',
+      },
+      projectId,
+      deviceId: 'mobile-device-xyz',
+      sessionId: 'deterministic-bucket-id',
+    };
+
+    (createEvent as Mock).mockReturnValue({});
+    await incomingEvent(jobData);
+
+    // Live state untouched: no sessionEnd job scheduled
+    expect(sessionsQueue.add).not.toHaveBeenCalled();
+    // Two createEvent calls: one for the historical session_start (lock
+    // acquired by default in the redis mock), one for the event itself
+    expect((createEvent as Mock).mock.calls).toHaveLength(2);
+    const startCall = (createEvent as Mock).mock.calls.find(
+      (call) => call[0]?.name === 'session_start',
+    );
+    const eventCall = (createEvent as Mock).mock.calls.find(
+      (call) => call[0]?.name === 'historical_event',
+    );
+    expect(startCall).toBeDefined();
+    expect(eventCall).toBeDefined();
+    expect(eventCall![0].deviceId).toBe('mobile-device-xyz');
+    expect(eventCall![0].sessionId).toBe('deterministic-bucket-id');
   });
 });

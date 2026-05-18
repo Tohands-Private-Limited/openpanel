@@ -33,7 +33,6 @@ export interface EventsQueuePayloadIncomingEvent {
     projectId: string;
     event: ITrackPayload & {
       timestamp: string | number;
-      isTimestampFromThePast: boolean;
     };
     uaInfo:
       | {
@@ -66,10 +65,6 @@ export interface EventsQueuePayloadIncomingEvent {
     headers: Record<string, string | undefined>;
     deviceId: string;
     sessionId: string;
-    session?: Pick<
-      IServiceCreateEventPayload,
-      'referrer' | 'referrerName' | 'referrerType'
-    >;
   };
 }
 export interface EventsQueuePayloadCreateEvent {
