@@ -30,7 +30,9 @@ on:
       - "**/.prettierignore"
 
 env:
-  repo_owner: "openpanel-dev"
+  # Pushes to ghcr.io/<repo_owner>/{api,dashboard,worker}.
+  # Lowercase — GHCR image paths are case-normalised.
+  repo_owner: "tohands-private-limited"
 
 jobs:
   lint-and-test:
@@ -154,7 +156,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.TOHANDS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Build and push by digest
         id: build
@@ -165,7 +167,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           cache-from: type=gha,scope=api-${{ env.PLATFORM_PAIR }}
           cache-to: type=gha,mode=max,scope=api-${{ env.PLATFORM_PAIR }}
-          outputs: type=image,name=ghcr.io/${{ env.repo_owner }}/api,push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=ghcr.io/${{ env.repo_owner }}/openpanel-api,push-by-digest=true,name-canonical=true,push=true
           build-args: |
             DATABASE_URL=postgresql://dummy:dummy@localhost:5432/dummy
 
@@ -216,14 +218,17 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.TOHANDS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Create manifest list and push
         working-directory: /tmp/digests
         run: |
-          docker buildx imagetools create \
-            -t ghcr.io/${{ env.repo_owner }}/api:${{ steps.tags.outputs.branch_name }}-${{ steps.tags.outputs.short_sha }} \
-            $(printf 'ghcr.io/${{ env.repo_owner }}/api@sha256:%s ' *)
+          TAGS=(-t ghcr.io/${{ env.repo_owner }}/openpanel-api:${{ steps.tags.outputs.branch_name }}-${{ steps.tags.outputs.short_sha }})
+          if [ "${{ github.ref }}" = "refs/heads/tohands/main" ]; then
+            TAGS+=(-t ghcr.io/${{ env.repo_owner }}/openpanel-api:latest)
+          fi
+          docker buildx imagetools create "${TAGS[@]}" \
+            $(printf 'ghcr.io/${{ env.repo_owner }}/openpanel-api@sha256:%s ' *)
 
       - name: Create/Update API tag
         if: github.ref == 'refs/heads/main'
@@ -273,7 +278,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.TOHANDS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Build and push by digest
         id: build
@@ -284,7 +289,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           cache-from: type=gha,scope=worker-${{ env.PLATFORM_PAIR }}
           cache-to: type=gha,mode=max,scope=worker-${{ env.PLATFORM_PAIR }}
-          outputs: type=image,name=ghcr.io/${{ env.repo_owner }}/worker,push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=ghcr.io/${{ env.repo_owner }}/openpanel-worker,push-by-digest=true,name-canonical=true,push=true
           build-args: |
             DATABASE_URL=postgresql://dummy:dummy@localhost:5432/dummy
 
@@ -335,14 +340,17 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.TOHANDS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Create manifest list and push
         working-directory: /tmp/digests
         run: |
-          docker buildx imagetools create \
-            -t ghcr.io/${{ env.repo_owner }}/worker:${{ steps.tags.outputs.branch_name }}-${{ steps.tags.outputs.short_sha }} \
-            $(printf 'ghcr.io/${{ env.repo_owner }}/worker@sha256:%s ' *)
+          TAGS=(-t ghcr.io/${{ env.repo_owner }}/openpanel-worker:${{ steps.tags.outputs.branch_name }}-${{ steps.tags.outputs.short_sha }})
+          if [ "${{ github.ref }}" = "refs/heads/tohands/main" ]; then
+            TAGS+=(-t ghcr.io/${{ env.repo_owner }}/openpanel-worker:latest)
+          fi
+          docker buildx imagetools create "${TAGS[@]}" \
+            $(printf 'ghcr.io/${{ env.repo_owner }}/openpanel-worker@sha256:%s ' *)
 
       - name: Create/Update Worker tag
         if: github.ref == 'refs/heads/main'
@@ -392,7 +400,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.TOHANDS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Build and push by digest
         id: build
@@ -403,7 +411,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           cache-from: type=gha,scope=dashboard-${{ env.PLATFORM_PAIR }}
           cache-to: type=gha,mode=max,scope=dashboard-${{ env.PLATFORM_PAIR }}
-          outputs: type=image,name=ghcr.io/${{ env.repo_owner }}/dashboard,push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=ghcr.io/${{ env.repo_owner }}/openpanel-dashboard,push-by-digest=true,name-canonical=true,push=true
           build-args: |
             NO_CLOUDFLARE=1
 
@@ -454,14 +462,17 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.TOHANDS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Create manifest list and push
         working-directory: /tmp/digests
         run: |
-          docker buildx imagetools create \
-            -t ghcr.io/${{ env.repo_owner }}/dashboard:${{ steps.tags.outputs.branch_name }}-${{ steps.tags.outputs.short_sha }} \
-            $(printf 'ghcr.io/${{ env.repo_owner }}/dashboard@sha256:%s ' *)
+          TAGS=(-t ghcr.io/${{ env.repo_owner }}/openpanel-dashboard:${{ steps.tags.outputs.branch_name }}-${{ steps.tags.outputs.short_sha }})
+          if [ "${{ github.ref }}" = "refs/heads/tohands/main" ]; then
+            TAGS+=(-t ghcr.io/${{ env.repo_owner }}/openpanel-dashboard:latest)
+          fi
+          docker buildx imagetools create "${TAGS[@]}" \
+            $(printf 'ghcr.io/${{ env.repo_owner }}/openpanel-dashboard@sha256:%s ' *)
 
       - name: Create/Update Dashboard tag
         if: github.ref == 'refs/heads/main'
