@@ -3,6 +3,8 @@ name: Docker Build and Push
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     paths-ignore:
       # README and docs
       - "**/README*"
@@ -224,7 +226,7 @@ jobs:
         working-directory: /tmp/digests
         run: |
           TAGS=(-t ghcr.io/${{ env.repo_owner }}/openpanel-api:${{ steps.tags.outputs.branch_name }}-${{ steps.tags.outputs.short_sha }})
-          if [ "${{ github.ref }}" = "refs/heads/tohands/main" ]; then
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
             TAGS+=(-t ghcr.io/${{ env.repo_owner }}/openpanel-api:latest)
           fi
           docker buildx imagetools create "${TAGS[@]}" \
@@ -346,7 +348,7 @@ jobs:
         working-directory: /tmp/digests
         run: |
           TAGS=(-t ghcr.io/${{ env.repo_owner }}/openpanel-worker:${{ steps.tags.outputs.branch_name }}-${{ steps.tags.outputs.short_sha }})
-          if [ "${{ github.ref }}" = "refs/heads/tohands/main" ]; then
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
             TAGS+=(-t ghcr.io/${{ env.repo_owner }}/openpanel-worker:latest)
           fi
           docker buildx imagetools create "${TAGS[@]}" \
@@ -468,7 +470,7 @@ jobs:
         working-directory: /tmp/digests
         run: |
           TAGS=(-t ghcr.io/${{ env.repo_owner }}/openpanel-dashboard:${{ steps.tags.outputs.branch_name }}-${{ steps.tags.outputs.short_sha }})
-          if [ "${{ github.ref }}" = "refs/heads/tohands/main" ]; then
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
             TAGS+=(-t ghcr.io/${{ env.repo_owner }}/openpanel-dashboard:latest)
           fi
           docker buildx imagetools create "${TAGS[@]}" \
