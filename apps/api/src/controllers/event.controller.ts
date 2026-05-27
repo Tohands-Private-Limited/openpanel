@@ -14,10 +14,7 @@ export async function postEvent(
   }>,
   reply: FastifyReply
 ) {
-  const { timestamp } = getTimestamp(
-    request.timestamp,
-    request.body
-  );
+  const { timestamp } = getTimestamp(request.timestamp, request.body);
   const ip = request.clientIp;
   const ua = request.headers['user-agent'] ?? 'unknown/1.0';
   const projectId = request.client?.projectId;
