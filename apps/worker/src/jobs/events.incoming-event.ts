@@ -170,6 +170,7 @@ export async function incomingEvent(
       ...properties,
       __hash: hash,
       __query: query,
+      __syncedAt: new Date().toISOString(),
     }),
     groups: body.groups ?? [],
     createdAt,
