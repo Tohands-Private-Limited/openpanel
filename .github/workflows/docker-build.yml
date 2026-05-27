@@ -7,6 +7,26 @@ on:
       - develop
       - staging
       - main
+    paths-ignore:
+      - "**/README*"
+      - "**/readme*"
+      - "**/*.md"
+      - "**/docs/**"
+      - "**/CHANGELOG*"
+      - "**/LICENSE*"
+      - "**/*.test.*"
+      - "**/*.spec.*"
+      - "**/__tests__/**"
+      - "**/tests/**"
+      - "packages/sdks/**"
+      - "apps/public/**"
+      - "**/.vscode/**"
+      - "**/.cursor/**"
+      - "**/.env.example"
+      - "**/.env.*.example"
+      - "**/.gitignore"
+      - "**/.eslintignore"
+      - "**/.prettierignore"
 
 env:
   # Pushes to ghcr.io/<repo_owner>/{api,dashboard,worker}.
