@@ -227,6 +227,21 @@ export const zTrackHandlerPayload = z.discriminatedUnion('type', [
 // Per-request caps: up to 2000 events and 10 MB uncompressed body.
 export const TRACK_BATCH_MAX_EVENTS = 2000;
 
+// Canonical batch envelope (matches upstream's planned contract):
+// `POST /track` with `{ type: 'batch', payload: [event, ...] }`.
+export const zTrackBatchHandlerPayload = z
+  .object({
+    type: z.literal('batch'),
+    payload: z.array(z.unknown()).min(1).max(TRACK_BATCH_MAX_EVENTS),
+  })
+  .meta({ title: 'Batch' });
+
+export type ITrackBatchHandlerPayload = z.infer<
+  typeof zTrackBatchHandlerPayload
+>;
+
+// Legacy envelope for the deprecated POST /track/batch route. Remove together
+// with that route once no client sends it anymore (see FORK-PATCHES.md).
 export const zTrackBatchBody = z.object({
   events: z.array(z.unknown()).min(1).max(TRACK_BATCH_MAX_EVENTS),
 });
