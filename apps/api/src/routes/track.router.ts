@@ -4,7 +4,6 @@ import {
   zTrackBatchHandlerPayload,
   zTrackHandlerPayload,
 } from '@openpanel/validation';
-import type { FastifyReply, FastifyRequest } from 'fastify';
 import type { FastifyPluginAsyncZodOpenApi } from 'fastify-zod-openapi';
 import { z } from 'zod';
 import {
@@ -18,6 +17,8 @@ import { isBotHook } from '@/hooks/is-bot.hook';
 
 // Body limit for batch-capable routes: 10 MB uncompressed, matching the
 // stated public contract ("up to 2000 events and 10 MB per request").
+// Note: this also raises the limit for single-event POST /track bodies
+// (previously the 1 MB Fastify default) — both shapes share the route.
 const TRACK_BATCH_BODY_LIMIT_BYTES = 10 * 1024 * 1024;
 
 // Shared 202 response schema for batch ingestion (both transports).
@@ -32,20 +33,6 @@ const zBatchResponse = z.object({
   ),
 });
 
-// The 100 ms body-hash dedup only runs for single events — offline-first
-// SDKs retry whole batches, and dropping a retried batch on hash collision
-// is the opposite of what we want.
-const singleEventDuplicateHook = async (
-  request: FastifyRequest,
-  reply: FastifyReply,
-) => {
-  const body = request.body as { type?: string } | undefined;
-  if (body?.type === 'batch') {
-    return;
-  }
-  return duplicateHook(request as Parameters<typeof duplicateHook>[0], reply);
-};
-
 const trackRouter: FastifyPluginAsyncZodOpenApi = async (fastify) => {
   fastify.addHook('preHandler', clientHook);
   fastify.addHook('preHandler', isBotHook);
@@ -54,7 +41,9 @@ const trackRouter: FastifyPluginAsyncZodOpenApi = async (fastify) => {
     method: 'POST',
     url: '/',
     bodyLimit: TRACK_BATCH_BODY_LIMIT_BYTES,
-    preValidation: singleEventDuplicateHook,
+    // duplicateHook itself skips batch envelopes (offline-first SDKs retry
+    // whole batches) — see hooks/duplicate.hook.ts.
+    preValidation: duplicateHook,
     schema: {
       body: z
         .union([zTrackHandlerPayload, zTrackBatchHandlerPayload])
