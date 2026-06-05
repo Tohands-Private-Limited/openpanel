@@ -23,6 +23,7 @@ import type {
   IIncrementPayload,
   IReplayPayload,
   ITrackBatchBody,
+  ITrackBatchHandlerPayload,
   ITrackHandlerPayload,
   ITrackPayload,
 } from '@openpanel/validation';
@@ -239,9 +240,7 @@ async function buildEventContext(
 }
 
 async function buildContext(
-  request: FastifyRequest<{
-    Body: ITrackHandlerPayload;
-  }>,
+  request: FastifyRequest,
   validatedBody: ITrackHandlerPayload,
 ): Promise<TrackContext> {
   const shared = await buildSharedRequestContext(request);
@@ -474,11 +473,18 @@ async function dispatchEvent(
 
 export async function handler(
   request: FastifyRequest<{
-    Body: ITrackHandlerPayload;
+    Body: ITrackHandlerPayload | ITrackBatchHandlerPayload;
   }>,
   reply: FastifyReply,
 ) {
   const validatedBody = request.body;
+
+  // Canonical batch envelope (matches upstream's planned contract):
+  // `{ type: 'batch', payload: [event, ...] }` — fan each item through the
+  // same per-event pipeline as a single-event request.
+  if (validatedBody.type === 'batch') {
+    return processBatch(request, reply, validatedBody.payload);
+  }
 
   // Reject `alias` before building context — saves the salts/geo/deviceId work
   // for a request that's going to fail anyway.
@@ -509,8 +515,11 @@ type BatchItemResult =
     };
 
 /**
- * POST /track/batch — accepts up to TRACK_BATCH_MAX_EVENTS payloads in one
- * request and dispatches each through the same per-event pipeline as /track.
+ * Batch ingestion — accepts up to TRACK_BATCH_MAX_EVENTS payloads in one
+ * request and dispatches each through the same per-event pipeline as a
+ * single-event request. Reached via `POST /track` with
+ * `{ type: 'batch', payload: [...] }` (canonical) or the deprecated
+ * `POST /track/batch` with `{ events: [...] }`.
  *
  * Per-event validation failures do NOT fail the whole batch: the response is
  * always 202 (assuming envelope + auth pass) with `{ accepted, rejected[] }`
@@ -527,13 +536,35 @@ type BatchItemResult =
 // turning a single big batch into a thundering herd.
 const BATCH_CONCURRENCY = 50;
 
+/**
+ * Deprecated `POST /track/batch` — same processing as the canonical
+ * `/track` batch envelope, different body shape. Warns per call so we can
+ * tell when client traffic has stopped and the route can be deleted
+ * (FORK-PATCHES.md).
+ */
 export async function batchHandler(
   request: FastifyRequest<{
     Body: ITrackBatchBody;
   }>,
   reply: FastifyReply,
 ) {
-  const { events } = request.body;
+  request.log.warn(
+    {
+      deprecatedEndpoint: 'POST /track/batch',
+      projectId: request.client?.projectId,
+      clientId: request.client?.id,
+      eventCount: request.body.events.length,
+    },
+    'deprecated /track/batch used — migrate to POST /track with { type: "batch", payload: [...] }',
+  );
+  return processBatch(request, reply, request.body.events);
+}
+
+async function processBatch(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  events: unknown[],
+) {
   const shared = await buildSharedRequestContext(request);
 
   const processOne = async (
@@ -590,11 +621,15 @@ export async function batchHandler(
     }
   }
 
-  const accepted = results.filter((r) => r.status === 'accepted').length;
-  const rejected = results.filter(
-    (r): r is Extract<BatchItemResult, { status: 'rejected' }> =>
-      r.status === 'rejected',
-  );
+  let accepted = 0;
+  const rejected: Extract<BatchItemResult, { status: 'rejected' }>[] = [];
+  for (const result of results) {
+    if (result.status === 'accepted') {
+      accepted += 1;
+    } else {
+      rejected.push(result);
+    }
+  }
 
   reply.status(202).send({
     accepted,
