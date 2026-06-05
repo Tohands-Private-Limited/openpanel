@@ -56,6 +56,9 @@ historical-event ingestion end to end.
 the `/track` envelope existed. The canonical transport is `/track` with
 `type: "batch"`.
 
-**Remove when:** no client traffic hits `/track/batch` anymore. Delete the
-route, `batchHandler`, `zTrackBatchBody`/`ITrackBatchBody`, and the legacy
-transport block in `track-batch.router.test.ts`.
+**Remove when:** no client traffic hits `/track/batch` anymore. Every call
+emits a warn log from `batchHandler` (`deprecatedEndpoint: "POST /track/batch"`
+with `projectId`/`clientId`) — when production shows no such lines for a
+comfortable window, delete the route, `batchHandler`,
+`zTrackBatchBody`/`ITrackBatchBody`, and the legacy transport block in
+`track-batch.router.test.ts`.
