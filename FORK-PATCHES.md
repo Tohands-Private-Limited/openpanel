@@ -16,6 +16,12 @@ This matches the contract requested by upstream in
 [PR #377](https://github.com/Openpanel-dev/openpanel/pull/377), so when
 upstream merges batch support, clients need no changes.
 
+## Permanent fork differences
+
+- `.github/workflows/docker-build.yml` — our Docker build/publish pipeline
+  (triggers on develop/staging/main). Keep our side on upstream syncs.
+- `FORK-PATCHES.md` (this file).
+
 ## Temporary patches
 
 ### 1. Worker-side historical-event/session handling
