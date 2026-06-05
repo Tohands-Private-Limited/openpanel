@@ -1,6 +1,7 @@
 import {
   TRACK_BATCH_MAX_EVENTS,
   zTrackBatchBody,
+  zTrackBatchHandlerPayload,
   zTrackHandlerPayload,
 } from '@openpanel/validation';
 import type { FastifyPluginAsyncZodOpenApi } from 'fastify-zod-openapi';
@@ -14,9 +15,23 @@ import { clientHook } from '@/hooks/client.hook';
 import { duplicateHook } from '@/hooks/duplicate.hook';
 import { isBotHook } from '@/hooks/is-bot.hook';
 
-// Per-route body limit for /track/batch: 10 MB uncompressed, matching the
+// Body limit for batch-capable routes: 10 MB uncompressed, matching the
 // stated public contract ("up to 2000 events and 10 MB per request").
+// Note: this also raises the limit for single-event POST /track bodies
+// (previously the 1 MB Fastify default) — both shapes share the route.
 const TRACK_BATCH_BODY_LIMIT_BYTES = 10 * 1024 * 1024;
+
+// Shared 202 response schema for batch ingestion (both transports).
+const zBatchResponse = z.object({
+  accepted: z.number().int().min(0),
+  rejected: z.array(
+    z.object({
+      index: z.number().int().min(0),
+      reason: z.enum(['validation', 'internal']),
+      error: z.string(),
+    }),
+  ),
+});
 
 const trackRouter: FastifyPluginAsyncZodOpenApi = async (fastify) => {
   fastify.addHook('preHandler', clientHook);
@@ -25,25 +40,27 @@ const trackRouter: FastifyPluginAsyncZodOpenApi = async (fastify) => {
   await fastify.route({
     method: 'POST',
     url: '/',
-    // The 100 ms body-hash dedup only runs on the single-event endpoint —
-    // applying it batch-wide would drop a whole 1000-event retry on hash
-    // collision, which is the opposite of what we want.
+    bodyLimit: TRACK_BATCH_BODY_LIMIT_BYTES,
+    // duplicateHook itself skips batch envelopes (offline-first SDKs retry
+    // whole batches) — see hooks/duplicate.hook.ts.
     preValidation: duplicateHook,
     schema: {
-      body: zTrackHandlerPayload.and(
-        z.object({
-          clientId: z.string().optional(),
-          clientSecret: z.string().optional(),
-        }),
-      ),
+      body: z
+        .union([zTrackHandlerPayload, zTrackBatchHandlerPayload])
+        .and(
+          z.object({
+            clientId: z.string().optional(),
+            clientSecret: z.string().optional(),
+          }),
+        ),
       tags: ['Track'],
-      description:
-        'Ingest a tracking event (track, identify, group, increment, decrement, replay).',
+      description: `Ingest a tracking event (track, identify, group, increment, decrement, replay) or a batch of events ({ "type": "batch", "payload": [event, ...] }). Batch requests accept up to ${TRACK_BATCH_MAX_EVENTS} events and 10MB uncompressed per request; each event is dispatched through the same pipeline as a single-event request. Per-event validation failures are returned in the rejected[] array — the whole batch does not fail on a single bad row.`,
       response: {
         200: z.object({
           deviceId: z.string(),
           sessionId: z.string(),
         }),
+        202: zBatchResponse,
       },
     },
     handler,
@@ -54,20 +71,12 @@ const trackRouter: FastifyPluginAsyncZodOpenApi = async (fastify) => {
     url: '/batch',
     bodyLimit: TRACK_BATCH_BODY_LIMIT_BYTES,
     schema: {
+      deprecated: true,
       body: zTrackBatchBody,
       tags: ['Track'],
-      description: `We accept up to ${TRACK_BATCH_MAX_EVENTS} events and 10MB uncompressed per request. Events are part of the request body. Each event is dispatched through the same pipeline as POST /track. Per-event validation failures are returned in the rejected[] array — the whole batch does not fail on a single bad row.`,
+      description: `Deprecated — use POST /track with { "type": "batch", "payload": [event, ...] } instead. Same semantics: up to ${TRACK_BATCH_MAX_EVENTS} events and 10MB uncompressed per request, per-event validation failures reported in rejected[].`,
       response: {
-        202: z.object({
-          accepted: z.number().int().min(0),
-          rejected: z.array(
-            z.object({
-              index: z.number().int().min(0),
-              reason: z.enum(['validation', 'internal']),
-              error: z.string(),
-            }),
-          ),
-        }),
+        202: zBatchResponse,
       },
     },
     handler: batchHandler,
