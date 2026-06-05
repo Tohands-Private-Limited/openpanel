@@ -14,7 +14,17 @@
  * from PG/CH, we only verify the controller dispatches each item correctly.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  type MockInstance,
+  vi,
+} from 'vitest';
 
 // ─── Module mocks (hoisted before imports) ────────────────────────────────────
 //
@@ -589,5 +599,48 @@ describe('POST /track type=batch — envelope specifics', () => {
       reason: 'validation',
     });
     expect(queueAdd).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('POST /track/batch — deprecation warning', () => {
+  // With `testing: true` the app uses Fastify's null logger, whose `child()`
+  // returns itself — so `request.log` IS `app.log` and spying on it captures
+  // the controller's per-request warn.
+  let warnSpy: MockInstance;
+
+  beforeEach(() => {
+    warnSpy = vi.spyOn(app.log, 'warn');
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it('warns with client/project identifiers so migration can be monitored', async () => {
+    const res = await postRaw('/track/batch', {
+      events: [validTrack(), validTrack()],
+    });
+    expect(res.statusCode).toBe(202);
+    expect(warnSpy).toHaveBeenCalledWith(
+      {
+        deprecatedEndpoint: 'POST /track/batch',
+        projectId: PROJECT_ID,
+        clientId: CLIENT_ID,
+        eventCount: 2,
+      },
+      expect.stringContaining('deprecated /track/batch'),
+    );
+  });
+
+  it('does not warn for the canonical /track batch envelope', async () => {
+    const res = await postRaw('/track', {
+      type: 'batch',
+      payload: [validTrack()],
+    });
+    expect(res.statusCode).toBe(202);
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      expect.objectContaining({ deprecatedEndpoint: expect.any(String) }),
+      expect.any(String),
+    );
   });
 });

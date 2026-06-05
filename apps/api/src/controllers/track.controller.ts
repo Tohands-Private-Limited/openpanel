@@ -538,7 +538,9 @@ const BATCH_CONCURRENCY = 50;
 
 /**
  * Deprecated `POST /track/batch` — same processing as the canonical
- * `/track` batch envelope, different body shape.
+ * `/track` batch envelope, different body shape. Warns per call so we can
+ * tell when client traffic has stopped and the route can be deleted
+ * (FORK-PATCHES.md).
  */
 export async function batchHandler(
   request: FastifyRequest<{
@@ -546,6 +548,15 @@ export async function batchHandler(
   }>,
   reply: FastifyReply,
 ) {
+  request.log.warn(
+    {
+      deprecatedEndpoint: 'POST /track/batch',
+      projectId: request.client?.projectId,
+      clientId: request.client?.id,
+      eventCount: request.body.events.length,
+    },
+    'deprecated /track/batch used — migrate to POST /track with { type: "batch", payload: [...] }',
+  );
   return processBatch(request, reply, request.body.events);
 }
 
