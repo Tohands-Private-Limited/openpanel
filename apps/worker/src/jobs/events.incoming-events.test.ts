@@ -22,7 +22,12 @@ vi.mock('@openpanel/db', async () => {
     getProjectByIdCached: vi.fn().mockResolvedValue({ filters: [] }),
     matchEvent: vi.fn().mockReturnValue(false),
     sessionBuffer: {
+      // name/getBufferSize keep metrics.ts happy (it registers a per-buffer
+      // gauge at import); the tests only drive getExistingSession/ingest.
+      name: 'session',
+      getBufferSize: vi.fn().mockResolvedValue(0),
       getExistingSession: vi.fn(),
+      ingest: vi.fn(),
     },
   };
 });
@@ -37,11 +42,8 @@ vi.mock('@openpanel/redis', async () => {
   };
 });
 
-// 30 minutes
-const SESSION_TIMEOUT = 30 * 60 * 1000;
 const projectId = 'test-project';
 const deviceId = 'device-123';
-// Valid UUID used when creating a new session in tests
 const newSessionId = 'a1b2c3d4-e5f6-4789-a012-345678901234';
 const geo = {
   country: 'US',
@@ -73,320 +75,259 @@ const uaInfoServer: EventsQueuePayloadIncomingEvent['payload']['uaInfo'] = {
   model: '',
 };
 
+function makeSession(
+  overrides: Partial<IClickhouseSession> = {}
+): IClickhouseSession {
+  const now = new Date();
+  return {
+    id: 'session-existing',
+    project_id: projectId,
+    device_id: deviceId,
+    profile_id: '',
+    event_count: 1,
+    screen_view_count: 0,
+    entry_path: '/',
+    entry_origin: 'https://example.com',
+    exit_path: '/',
+    exit_origin: 'https://example.com',
+    created_at: formatClickhouseDate(now),
+    ended_at: formatClickhouseDate(now),
+    os: 'Windows',
+    os_version: '10',
+    browser: 'Chrome',
+    browser_version: '91.0.4472.124',
+    device: 'desktop',
+    brand: '',
+    model: '',
+    country: 'US',
+    region: 'NY',
+    city: 'New York',
+    longitude: 0,
+    latitude: 0,
+    duration: 0,
+    referrer: '',
+    referrer_name: '',
+    referrer_type: '',
+    is_bounce: true,
+    utm_term: '',
+    utm_source: '',
+    utm_campaign: '',
+    utm_content: '',
+    utm_medium: '',
+    revenue: 0,
+    sign: 1,
+    version: 1,
+    groups: [],
+    ...overrides,
+  } satisfies IClickhouseSession;
+}
+
+function buildJobData(
+  overrides: Partial<EventsQueuePayloadIncomingEvent['payload']> = {}
+): EventsQueuePayloadIncomingEvent['payload'] {
+  return {
+    geo,
+    event: {
+      name: 'test_event',
+      timestamp: new Date().toISOString(),
+      isTimestampFromThePast: false,
+      properties: { __path: 'https://example.com/test' },
+    },
+    uaInfo,
+    headers: {
+      'request-id': '123',
+      'user-agent': 'Mozilla/5.0',
+      'openpanel-sdk-name': 'web',
+      'openpanel-sdk-version': '1.0.0',
+    },
+    projectId,
+    deviceId,
+    sessionId: newSessionId,
+    ...overrides,
+  };
+}
+
 describe('incomingEvent', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    (createEvent as Mock).mockImplementation((event) => event);
   });
 
-  it('should create a session start and an event', async () => {
-    const spySessionsQueueAdd = vi
-      .spyOn(sessionsQueue, 'add')
-      .mockResolvedValue({} as Job);
-    const timestamp = new Date();
-    // Mock job data
-    const jobData: EventsQueuePayloadIncomingEvent['payload'] = {
-      geo,
-      event: {
-        name: 'test_event',
-        timestamp: timestamp.toISOString(),
-        properties: { __path: 'https://example.com/test' },
-      },
-      uaInfo,
-      headers: {
-        'request-id': '123',
-        'user-agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'openpanel-sdk-name': 'web',
-        'openpanel-sdk-version': '1.0.0',
-      },
-      projectId,
-      deviceId,
-      sessionId: newSessionId,
-    };
-    const event = {
-      name: 'test_event',
-      deviceId,
-      profileId: '',
-      sessionId: expect.stringMatching(
-        // biome-ignore lint/performance/useTopLevelRegex: test
-        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-      ),
-      projectId,
-      properties: {
-        __hash: undefined,
-        __query: undefined,
-        __syncedAt: expect.any(String),
-      },
-      createdAt: timestamp,
-      country: 'US',
-      city: 'New York',
-      region: 'NY',
-      revenue: undefined,
-      longitude: 0,
-      latitude: 0,
-      os: 'Windows',
-      osVersion: '10',
-      browser: 'Chrome',
-      browserVersion: '91.0.4472.124',
-      device: 'desktop',
-      brand: '',
-      model: '',
-      duration: 0,
-      path: '/test',
-      origin: 'https://example.com',
-      referrer: '',
-      referrerName: '',
-      referrerType: '',
-      sdkName: jobData.headers['openpanel-sdk-name'],
-      sdkVersion: jobData.headers['openpanel-sdk-version'],
-      groups: [],
-    };
+  // ----- Live path (sessionBuffer.ingest) -----
 
-    (createEvent as Mock).mockReturnValue(event);
-
-    // Execute the job
-    await incomingEvent(jobData);
-
-    expect(spySessionsQueueAdd).toHaveBeenCalledWith(
-      'session',
-      {
-        type: 'createSessionEnd',
-        payload: expect.objectContaining(event),
-      },
-      {
-        delay: SESSION_TIMEOUT,
-        jobId: `sessionEnd:${projectId}:${deviceId}`,
-        attempts: 3,
-        backoff: {
-          delay: 200,
-          type: 'exponential',
-        },
-      }
-    );
-
-    expect((createEvent as Mock).mock.calls[0]![0]).toStrictEqual({
-      ...event,
-      createdAt: new Date(timestamp.getTime() - 100),
-      name: 'session_start',
+  it('emits session_start when ingest returns kind="new"', async () => {
+    vi.mocked(sessionBuffer.ingest).mockResolvedValueOnce({
+      kind: 'new',
+      current: makeSession({ id: newSessionId }),
     });
-    expect((createEvent as Mock).mock.calls[1]).toMatchObject([event]);
+
+    await incomingEvent(buildJobData());
+
+    expect(sessionsQueue.add).not.toHaveBeenCalled();
+    const calls = (createEvent as Mock).mock.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[0]![0].name).toBe('session_start');
+    expect(calls[1]![0].name).toBe('test_event');
+    // FORK: every written event carries a __syncedAt processing stamp.
+    expect(calls[1]![0].properties.__syncedAt).toEqual(expect.any(String));
   });
 
-  it('should reuse existing session', async () => {
-    const spySessionsQueueAdd = vi.spyOn(sessionsQueue, 'add');
-    const spySessionsQueueGetJob = vi.spyOn(sessionsQueue, 'getJob');
+  it('skips session_start when ingest returns kind="extend"', async () => {
+    vi.mocked(sessionBuffer.ingest).mockResolvedValueOnce({
+      kind: 'extend',
+      current: makeSession(),
+    });
 
-    const timestamp = new Date();
-    // Mock job data
-    const jobData: EventsQueuePayloadIncomingEvent['payload'] = {
-      geo,
-      event: {
-        name: 'test_event',
-        timestamp: timestamp.toISOString(),
-        properties: { __path: 'https://example.com/test' },
-      },
-      headers: {
-        'request-id': '123',
-        'user-agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'openpanel-sdk-name': 'web',
-        'openpanel-sdk-version': '1.0.0',
-      },
-      uaInfo,
-      projectId,
-      deviceId,
-      sessionId: 'session-123',
-    };
+    await incomingEvent(buildJobData());
 
-    const changeDelay = vi.fn();
-    const updateData = vi.fn();
-    spySessionsQueueGetJob.mockResolvedValueOnce({
-      getState: vi.fn().mockResolvedValue('delayed'),
-      updateData,
-      changeDelay,
-      data: {
-        type: 'createSessionEnd',
-        payload: {
-          sessionId: 'session-123',
-          deviceId,
-        },
-      },
-    } as Partial<Job> as Job);
-    // Execute the job
-    await incomingEvent(jobData);
-
-    const event = {
-      name: 'test_event',
-      deviceId,
-      profileId: '',
-      sessionId: 'session-123',
-      projectId,
-      properties: {
-        __hash: undefined,
-        __query: undefined,
-        __syncedAt: expect.any(String),
-      },
-      createdAt: timestamp,
-      country: 'US',
-      city: 'New York',
-      region: 'NY',
-      revenue: undefined,
-      longitude: 0,
-      latitude: 0,
-      os: 'Windows',
-      osVersion: '10',
-      browser: 'Chrome',
-      browserVersion: '91.0.4472.124',
-      device: 'desktop',
-      brand: '',
-      model: '',
-      duration: 0,
-      path: '/test',
-      origin: 'https://example.com',
-      referrer: '',
-      referrerName: '',
-      referrerType: '',
-      sdkName: jobData.headers['openpanel-sdk-name'],
-      sdkVersion: jobData.headers['openpanel-sdk-version'],
-      groups: [],
-    };
-
-    expect(spySessionsQueueAdd).toHaveBeenCalledTimes(0);
-    expect(changeDelay).toHaveBeenCalledWith(SESSION_TIMEOUT);
-    expect(createEvent as Mock).toBeCalledTimes(1);
-    expect((createEvent as Mock).mock.calls[0]![0]).toStrictEqual(event);
+    expect(sessionsQueue.add).not.toHaveBeenCalled();
+    const sessionStartCalls = (createEvent as Mock).mock.calls.filter(
+      ([arg]) => arg?.name === 'session_start'
+    );
+    expect(sessionStartCalls).toHaveLength(0);
   });
 
-  it('should handle server events (with existing screen view)', async () => {
-    const timestamp = new Date();
-    const jobData: EventsQueuePayloadIncomingEvent['payload'] = {
-      geo,
+  it('closes old session and emits session_start when ingest returns kind="boundary"', async () => {
+    const closed = makeSession({ id: 'old-session-id' });
+    const current = makeSession({ id: newSessionId });
+    vi.mocked(sessionBuffer.ingest).mockResolvedValueOnce({
+      kind: 'boundary',
+      current,
+      closed,
+    });
+
+    const spy = vi.spyOn(sessionsQueue, 'add').mockResolvedValue({} as Job);
+
+    await incomingEvent(buildJobData());
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    const [, payload, opts] = spy.mock.calls[0]!;
+    expect((payload as any).type).toBe('createSessionEnd');
+    expect((payload as any).payload.sessionId).toBe('old-session-id');
+    expect((payload as any).snapshot.id).toBe('old-session-id');
+    expect(opts?.jobId).toBe('sessionEnd:v2:old-session-id');
+
+    const calls = (createEvent as Mock).mock.calls;
+    expect(calls.filter(([a]) => a?.name === 'session_start')).toHaveLength(1);
+    expect(calls.filter(([a]) => a?.name === 'test_event')).toHaveLength(1);
+  });
+
+  it('inherits referrer from current session on the actual event', async () => {
+    vi.mocked(sessionBuffer.ingest).mockResolvedValueOnce({
+      kind: 'extend',
+      current: makeSession({
+        referrer: 'https://google.com',
+        referrer_name: 'Google',
+        referrer_type: 'search',
+      }),
+    });
+
+    await incomingEvent(buildJobData());
+
+    const testEventCall = (createEvent as Mock).mock.calls.find(
+      ([a]) => a?.name === 'test_event'
+    );
+    expect(testEventCall![0].referrer).toBe('https://google.com');
+    expect(testEventCall![0].referrerName).toBe('Google');
+    expect(testEventCall![0].referrerType).toBe('search');
+  });
+
+  it('emits session_start only once across 3 rapid events (new → extend → extend)', async () => {
+    const session = makeSession({ id: newSessionId });
+    vi.mocked(sessionBuffer.ingest)
+      .mockResolvedValueOnce({ kind: 'new', current: session })
+      .mockResolvedValueOnce({ kind: 'extend', current: session })
+      .mockResolvedValueOnce({ kind: 'extend', current: session });
+
+    await incomingEvent(buildJobData({ event: { name: 'e1', timestamp: new Date().toISOString(), isTimestampFromThePast: false, properties: { __path: 'https://example.com/test' } } }));
+    await incomingEvent(buildJobData({ event: { name: 'e2', timestamp: new Date().toISOString(), isTimestampFromThePast: false, properties: { __path: 'https://example.com/test' } } }));
+    await incomingEvent(buildJobData({ event: { name: 'e3', timestamp: new Date().toISOString(), isTimestampFromThePast: false, properties: { __path: 'https://example.com/test' } } }));
+
+    const sessionStartCalls = (createEvent as Mock).mock.calls.filter(
+      ([a]) => a?.name === 'session_start'
+    );
+    expect(sessionStartCalls).toHaveLength(1);
+    expect(sessionsQueue.add).not.toHaveBeenCalled();
+  });
+
+  // ----- Server events (ride existing session, never open/close) -----
+
+  it('handles server events with existing profile session', async () => {
+    const jobData = buildJobData({
       event: {
         name: 'server_event',
-        timestamp: timestamp.toISOString(),
+        timestamp: new Date().toISOString(),
+        isTimestampFromThePast: false,
         properties: { custom_property: 'test_value' },
         profileId: 'profile-123',
       },
+      uaInfo: uaInfoServer,
+      deviceId: '',
+      sessionId: '',
       headers: {
         'user-agent': 'OpenPanel Server/1.0',
         'openpanel-sdk-name': 'server',
         'openpanel-sdk-version': '1.0.0',
         'request-id': '123',
       },
-      projectId,
-      deviceId: '',
-      sessionId: '',
-      uaInfo: uaInfoServer,
-    };
+    });
 
-    vi.mocked(sessionBuffer.getExistingSession).mockResolvedValueOnce({
-      id: 'last-session-456',
-      event_count: 0,
-      screen_view_count: 0,
-      entry_path: '/last-path',
-      entry_origin: 'https://example.com',
-      exit_path: '/last-path',
-      exit_origin: 'https://example.com',
-      created_at: formatClickhouseDate(timestamp),
-      ended_at: formatClickhouseDate(timestamp),
-      os: 'iOS',
-      os_version: '15.0',
-      browser: 'Safari',
-      browser_version: '15.0',
-      device: 'mobile',
-      brand: 'Apple',
-      model: 'iPhone',
-      country: 'CA',
-      region: 'ON',
-      city: 'Toronto',
-      longitude: 0,
-      latitude: 0,
-      duration: 0,
-      referrer: 'https://google.com',
-      referrer_name: 'Google',
-      referrer_type: 'search',
-      is_bounce: false,
-      utm_term: '',
-      utm_source: '',
-      utm_campaign: '',
-      utm_content: '',
-      utm_medium: '',
-      revenue: 0,
-      project_id: projectId,
-      device_id: 'last-device-123',
-      profile_id: 'profile-123',
-      sign: 1,
-      version: 1,
-      groups: [],
-    } satisfies IClickhouseSession);
+    vi.mocked(sessionBuffer.getExistingSession).mockResolvedValueOnce(
+      makeSession({
+        id: 'last-session-456',
+        device_id: 'last-device-123',
+        profile_id: 'profile-123',
+        country: 'CA',
+        region: 'ON',
+        city: 'Toronto',
+        referrer: 'https://google.com',
+        referrer_name: 'Google',
+        referrer_type: 'search',
+      })
+    );
 
     await incomingEvent(jobData);
 
-    expect((createEvent as Mock).mock.calls[0]![0]).toStrictEqual({
+    expect(sessionBuffer.ingest).not.toHaveBeenCalled();
+    expect(sessionsQueue.add).not.toHaveBeenCalled();
+    expect((createEvent as Mock).mock.calls[0]![0]).toMatchObject({
       name: 'server_event',
       deviceId: 'last-device-123',
       sessionId: 'last-session-456',
       profileId: 'profile-123',
-      projectId,
-      properties: {
-        custom_property: 'test_value',
-        __hash: undefined,
-        __query: undefined,
-        __syncedAt: expect.any(String),
-      },
-      createdAt: timestamp,
-      country: 'CA',
       city: 'Toronto',
-      region: 'ON',
-      longitude: 0,
-      latitude: 0,
-      os: 'iOS',
-      osVersion: '15.0',
-      browser: 'Safari',
-      browserVersion: '15.0',
-      device: 'mobile',
-      brand: 'Apple',
-      model: 'iPhone',
-      duration: 0,
-      path: '/last-path',
-      origin: 'https://example.com',
+      country: 'CA',
       referrer: 'https://google.com',
-      referrerName: 'Google',
-      referrerType: 'search',
-      sdkName: 'server',
-      sdkVersion: '1.0.0',
-      revenue: undefined,
-      groups: [],
     });
-
-    expect(sessionsQueue.add).not.toHaveBeenCalled();
   });
 
-  it('should handle server events (without existing screen view)', async () => {
-    const timestamp = new Date();
-    const jobData: EventsQueuePayloadIncomingEvent['payload'] = {
-      geo,
-      event: {
-        name: 'server_event',
-        timestamp: timestamp.toISOString(),
-        properties: { custom_property: 'test_value' },
-        profileId: 'profile-123',
-      },
-      headers: {
-        'user-agent': 'OpenPanel Server/1.0',
-        'openpanel-sdk-name': 'server',
-        'openpanel-sdk-version': '1.0.0',
-        'request-id': '123',
-      },
-      projectId,
-      deviceId: '',
-      sessionId: '',
-      uaInfo: uaInfoServer,
-    };
+  it('handles server events without any active session', async () => {
+    vi.mocked(sessionBuffer.getExistingSession).mockResolvedValueOnce(null);
 
-    await incomingEvent(jobData);
+    await incomingEvent(
+      buildJobData({
+        event: {
+          name: 'server_event',
+          timestamp: new Date().toISOString(),
+          properties: { custom_property: 'test_value' },
+          profileId: 'profile-123',
+          isTimestampFromThePast: false,
+        },
+        uaInfo: uaInfoServer,
+        deviceId: '',
+        sessionId: '',
+        headers: {
+          'user-agent': 'OpenPanel Server/1.0',
+          'openpanel-sdk-name': 'server',
+          'openpanel-sdk-version': '1.0.0',
+          'request-id': '123',
+        },
+      })
+    );
 
-    expect((createEvent as Mock).mock.calls[0]![0]).toStrictEqual({
+    expect(sessionBuffer.ingest).not.toHaveBeenCalled();
+    expect(sessionsQueue.add).not.toHaveBeenCalled();
+    expect((createEvent as Mock).mock.calls[0]![0]).toMatchObject({
       name: 'server_event',
       // Server event with profileId but no existing session: keep the
       // API-computed identity instead of blanking deviceId/sessionId.
@@ -394,208 +335,98 @@ describe('incomingEvent', () => {
       deviceId: '',
       sessionId: '',
       profileId: 'profile-123',
-      projectId,
-      properties: {
-        custom_property: 'test_value',
-        __hash: undefined,
-        __query: undefined,
-        __syncedAt: expect.any(String),
-      },
-      createdAt: timestamp,
-      country: 'US',
-      city: 'New York',
-      region: 'NY',
-      revenue: undefined,
-      longitude: 0,
-      latitude: 0,
-      os: '',
-      osVersion: '',
-      browser: '',
-      browserVersion: '',
-      device: 'server',
-      brand: '',
-      model: '',
-      duration: 0,
-      path: '',
-      origin: '',
-      // baseEvent fields fall through uniformly when there's no
-      // session enrichment available — empty strings for all referrer
-      // fields rather than the previous mix of undefined/''.
-      referrer: '',
-      referrerName: '',
-      referrerType: '',
-      sdkName: 'server',
-      sdkVersion: '1.0.0',
-      groups: [],
     });
-
-    expect(sessionsQueue.add).not.toHaveBeenCalled();
   });
 
-  it('should emit session_start only once when 3 events arrive in rapid succession', async () => {
-    // Regression test: previously the API baked `session: undefined` into every
-    // payload when no session-end job existed yet. Even with sequential
-    // per-device processing in the worker, the worker re-checks the BullMQ
-    // session-end job at processing time, so events 2 and 3 should extend
-    // rather than emit duplicate session_starts.
-    const spySessionsQueueAdd = vi
-      .spyOn(sessionsQueue, 'add')
-      .mockResolvedValue({} as Job);
-    const spySessionsQueueGetJob = vi.spyOn(sessionsQueue, 'getJob');
-
-    const buildJobData = (
-      eventName: string,
-    ): EventsQueuePayloadIncomingEvent['payload'] => ({
-      geo,
-      event: {
-        name: eventName,
-        timestamp: new Date().toISOString(),
-        properties: { __path: 'https://example.com/test' },
-      },
-      uaInfo,
-      headers: {
-        'request-id': '123',
-        'user-agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'openpanel-sdk-name': 'web',
-        'openpanel-sdk-version': '1.0.0',
-      },
-      projectId,
-      deviceId,
-      sessionId: newSessionId,
-    });
-
-    // Event 1: no session-end job exists yet → emit session_start.
-    spySessionsQueueGetJob.mockResolvedValueOnce(undefined);
-    // Events 2 and 3: session-end job is now present (delayed) → extend only.
-    const liveJob = {
-      id: `sessionEnd:${projectId}:${deviceId}`,
-      getState: vi.fn().mockResolvedValue('delayed'),
-      changeDelay: vi.fn(),
-      data: {
-        type: 'createSessionEnd',
-        payload: {
-          sessionId: newSessionId,
-          deviceId,
-          referrer: '',
-          referrerName: '',
-          referrerType: '',
+  it('does NOT enrich a server event when the timestamp is from the past', async () => {
+    // Past server event: enrichment is skipped (profileId && !isTimestampFromThePast
+    // is false), so getExistingSession is never read and the API-computed id stays.
+    await incomingEvent(
+      buildJobData({
+        event: {
+          name: 'server_event',
+          timestamp: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+          isTimestampFromThePast: true,
+          properties: { custom_property: 'test_value' },
+          profileId: 'profile-123',
         },
-      },
-    } as Partial<Job> as Job;
-    spySessionsQueueGetJob.mockResolvedValue(liveJob);
-
-    (createEvent as Mock).mockImplementation((event) => event);
-
-    await incomingEvent(buildJobData('event_a'));
-    await incomingEvent(buildJobData('event_b'));
-    await incomingEvent(buildJobData('event_c'));
-
-    const sessionStartCalls = (createEvent as Mock).mock.calls.filter(
-      ([arg]) => arg?.name === 'session_start',
+        uaInfo: uaInfoServer,
+        deviceId: 'server-device',
+        sessionId: 'server-bucket-id',
+      })
     );
-    expect(sessionStartCalls).toHaveLength(1);
 
-    // Only the first event should have queued a session-end job; subsequent
-    // events extend the existing one via changeDelay.
-    expect(spySessionsQueueAdd).toHaveBeenCalledTimes(1);
-  });
-
-  it('does not emit duplicate session_start when lock is held', async () => {
-    const { getLock } = await import('@openpanel/redis');
-    // Simulate "another worker already claimed session_start" by failing
-    // the lock acquisition. Live event still fires; sessionEnd job is
-    // still scheduled (it's idempotent on jobId).
-    vi.mocked(getLock).mockResolvedValueOnce(false);
-    // No active session-end job exists yet — force getJob to undefined so the
-    // worker falls into the "no active session" branch where the lock check
-    // matters. (vi.clearAllMocks resets call history but keeps implementations
-    // set via mockResolvedValue in previous tests.)
-    vi.spyOn(sessionsQueue, 'getJob').mockResolvedValue(undefined);
-    const spySessionsQueueAdd = vi
-      .spyOn(sessionsQueue, 'add')
-      .mockResolvedValue({} as Job);
-
-    const timestamp = new Date();
-    const jobData: EventsQueuePayloadIncomingEvent['payload'] = {
-      geo,
-      event: {
-        name: 'live_event',
-        timestamp: timestamp.toISOString(),
-        properties: { __path: 'https://example.com/test' },
-      },
-      uaInfo,
-      headers: {
-        'request-id': '123',
-        'user-agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/91.0.4472.124',
-        'openpanel-sdk-name': 'web',
-        'openpanel-sdk-version': '1.0.0',
-      },
-      projectId,
-      deviceId,
-      sessionId: newSessionId,
-    };
-    (createEvent as Mock).mockReturnValue({});
-
-    await incomingEvent(jobData);
-
-    // No session_start emission (lock not acquired)
-    const startCalls = (createEvent as Mock).mock.calls.filter(
-      (call) => call[0]?.name === 'session_start',
-    );
-    expect(startCalls).toHaveLength(0);
-    // Live event itself still gets created
-    const liveCalls = (createEvent as Mock).mock.calls.filter(
-      (call) => call[0]?.name === 'live_event',
-    );
-    expect(liveCalls).toHaveLength(1);
-    // sessionEnd is still scheduled even when lock not acquired (idempotent)
-    expect(spySessionsQueueAdd).toHaveBeenCalled();
-  });
-
-  it('historical event preserves API-computed deviceId/sessionId', async () => {
-    // Event with __timestamp older than SESSION_TIMEOUT (30 min). Worker
-    // should write it with the deviceId/sessionId the API computed,
-    // without scheduling sessionEnd (live state untouched).
-    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-    const jobData: EventsQueuePayloadIncomingEvent['payload'] = {
-      geo,
-      event: {
-        name: 'historical_event',
-        timestamp: oneHourAgo.toISOString(),
-        properties: { __path: 'https://example.com/replay' },
-      },
-      uaInfo,
-      headers: {
-        'request-id': '123',
-        'user-agent':
-          'Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15',
-        'openpanel-sdk-name': 'react-native',
-        'openpanel-sdk-version': '1.0.0',
-      },
-      projectId,
-      deviceId: 'mobile-device-xyz',
-      sessionId: 'deterministic-bucket-id',
-    };
-
-    (createEvent as Mock).mockReturnValue({});
-    await incomingEvent(jobData);
-
-    // Live state untouched: no sessionEnd job scheduled
+    expect(sessionBuffer.getExistingSession).not.toHaveBeenCalled();
+    expect(sessionBuffer.ingest).not.toHaveBeenCalled();
     expect(sessionsQueue.add).not.toHaveBeenCalled();
-    // Two createEvent calls: one for the historical session_start (lock
-    // acquired by default in the redis mock), one for the event itself
-    expect((createEvent as Mock).mock.calls).toHaveLength(2);
-    const startCall = (createEvent as Mock).mock.calls.find(
-      (call) => call[0]?.name === 'session_start',
+    const calls = (createEvent as Mock).mock.calls;
+    // No session_start for server events, just the event itself.
+    expect(calls.filter(([a]) => a?.name === 'session_start')).toHaveLength(0);
+    expect(calls[0]![0]).toMatchObject({
+      name: 'server_event',
+      deviceId: 'server-device',
+      sessionId: 'server-bucket-id',
+    });
+  });
+
+  // ----- FORK: historical reconstruction arm (isTimestampFromThePast) -----
+
+  it('reconstructs a historical session: session_start + event, no live state touched', async () => {
+    await incomingEvent(
+      buildJobData({
+        event: {
+          name: 'historical_event',
+          timestamp: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+          isTimestampFromThePast: true,
+          properties: { __path: 'https://example.com/replay' },
+        },
+        deviceId: 'mobile-device-xyz',
+        sessionId: 'deterministic-bucket-id',
+      })
     );
-    const eventCall = (createEvent as Mock).mock.calls.find(
-      (call) => call[0]?.name === 'historical_event',
-    );
+
+    // Live state untouched: ingest never runs, no sessionEnd job scheduled.
+    expect(sessionBuffer.ingest).not.toHaveBeenCalled();
+    expect(sessionsQueue.add).not.toHaveBeenCalled();
+
+    // Two createEvent calls: the historical session_start (lock acquired by
+    // default in the redis mock) and the event itself, both keeping the
+    // API-computed deterministic id.
+    const calls = (createEvent as Mock).mock.calls;
+    expect(calls).toHaveLength(2);
+    const startCall = calls.find(([a]) => a?.name === 'session_start');
+    const eventCall = calls.find(([a]) => a?.name === 'historical_event');
     expect(startCall).toBeDefined();
     expect(eventCall).toBeDefined();
     expect(eventCall![0].deviceId).toBe('mobile-device-xyz');
     expect(eventCall![0].sessionId).toBe('deterministic-bucket-id');
+  });
+
+  it('historical event does not duplicate session_start when the lock is held', async () => {
+    const { getLock } = await import('@openpanel/redis');
+    // Another worker / earlier batch event already claimed the session_start.
+    vi.mocked(getLock).mockResolvedValueOnce(false);
+
+    await incomingEvent(
+      buildJobData({
+        event: {
+          name: 'historical_event',
+          timestamp: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+          isTimestampFromThePast: true,
+          properties: { __path: 'https://example.com/replay' },
+        },
+        deviceId: 'mobile-device-xyz',
+        sessionId: 'deterministic-bucket-id',
+      })
+    );
+
+    expect(sessionBuffer.ingest).not.toHaveBeenCalled();
+    expect(sessionsQueue.add).not.toHaveBeenCalled();
+    const calls = (createEvent as Mock).mock.calls;
+    // No session_start (lock not acquired), but the event itself still lands.
+    expect(calls.filter(([a]) => a?.name === 'session_start')).toHaveLength(0);
+    expect(calls.filter(([a]) => a?.name === 'historical_event')).toHaveLength(
+      1
+    );
   });
 });
