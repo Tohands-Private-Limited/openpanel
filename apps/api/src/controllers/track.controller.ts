@@ -1,10 +1,13 @@
 import { generateId } from '@openpanel/common';
 import { generateDeviceId, parseUserAgent } from '@openpanel/common/server';
 import {
+  convertClickhouseDateToJs,
   getProfileById,
   getSalts,
   groupBuffer,
   replayBuffer,
+  SESSION_TIMEOUT_MS,
+  sessionBuffer,
   upsertProfile,
 } from '@openpanel/db';
 import { type GeoLocation, getGeoLocation } from '@openpanel/geo';
@@ -14,7 +17,6 @@ import {
   produceIncomingEvent,
   shouldUseKafka,
 } from '@openpanel/queue';
-import { getRedisCache } from '@openpanel/redis';
 import type {
   IAssignGroupPayload,
   IDecrementPayload,
@@ -90,6 +92,29 @@ function getIdentity(body: ITrackHandlerPayload): IIdentifyPayload | undefined {
   return undefined;
 }
 
+const MAX_OVERRIDE_DEVICE_ID_LENGTH = 64;
+
+function sanitizeOverrideDeviceId(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') {
+    return undefined;
+  }
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > MAX_OVERRIDE_DEVICE_ID_LENGTH) {
+    return undefined;
+  }
+  return trimmed;
+}
+
+// Resolve a caller-supplied device id from a track event's `properties.__deviceId`.
+export function getOverrideDeviceId(
+  body: ITrackHandlerPayload
+): string | undefined {
+  if (body.type !== 'track') {
+    return undefined;
+  }
+  return sanitizeOverrideDeviceId(body.payload?.properties?.__deviceId);
+}
+
 export function getTimestamp(
   timestamp: FastifyRequest['timestamp'],
   payload: ITrackHandlerPayload['payload']
@@ -101,7 +126,7 @@ export function getTimestamp(
       : undefined;
 
   if (!userDefinedTimestamp) {
-    return { timestamp: safeTimestamp };
+    return { timestamp: safeTimestamp, isTimestampFromThePast: false };
   }
 
   const clientTimestamp = new Date(userDefinedTimestamp);
@@ -109,6 +134,7 @@ export function getTimestamp(
 
   // Constants for time validation
   const ONE_MINUTE_MS = 60 * 1000;
+  const FIFTEEN_MINUTES_MS = 15 * ONE_MINUTE_MS;
   // Hard floor for accepted historical events. Public contract for /track
   // and /track/batch, hard-coded (not per-project configurable).
   const FIVE_DAYS_MS = 5 * 24 * 60 * 60 * 1000;
@@ -118,7 +144,7 @@ export function getTimestamp(
     Number.isNaN(clientTimestampNumber) ||
     clientTimestampNumber > safeTimestamp + ONE_MINUTE_MS
   ) {
-    return { timestamp: safeTimestamp };
+    return { timestamp: safeTimestamp, isTimestampFromThePast: false };
   }
 
   // Reject events older than 5 days. In /track/batch this surfaces as a
@@ -128,7 +154,13 @@ export function getTimestamp(
     throw new HttpError('event timestamp older than 5 days', { status: 400 });
   }
 
-  return { timestamp: clientTimestampNumber };
+  // Events older than 15 minutes are historical: they must not extend or open
+  // a live session. The worker reconstructs a session from the deterministic,
+  // timestamp-bucketed id instead (see ids.ts + events.incoming-event.ts).
+  const isTimestampFromThePast =
+    clientTimestampNumber < safeTimestamp - FIFTEEN_MINUTES_MS;
+
+  return { timestamp: clientTimestampNumber, isTimestampFromThePast };
 }
 
 interface TrackContext {
@@ -136,7 +168,7 @@ interface TrackContext {
   ip: string;
   ua?: string;
   headers: Record<string, string | undefined>;
-  timestamp: { value: number };
+  timestamp: { value: number; isFromPast: boolean };
   identity?: IIdentifyPayload;
   deviceId: string;
   sessionId: string;
@@ -206,11 +238,7 @@ async function buildEventContext(
     validatedBody.payload.profileId = profileId;
   }
 
-  const overrideDeviceId =
-    validatedBody.type === 'track' &&
-    typeof validatedBody.payload?.properties?.__deviceId === 'string'
-      ? validatedBody.payload?.properties.__deviceId
-      : undefined;
+  const overrideDeviceId = getOverrideDeviceId(validatedBody);
 
   const deviceIdResult = await getDeviceId({
     projectId: shared.projectId,
@@ -219,9 +247,12 @@ async function buildEventContext(
     salts: shared.salts,
     overrideDeviceId,
     // Bucket the deterministic session_id by the event's own __timestamp,
-    // not the wall-clock moment the request arrived. Critical for
-    // /track/batch where one request can contain events spanning days.
-    eventMs: timestamp.timestamp,
+    // not the wall-clock moment the request arrived. Critical for batch
+    // ingestion where one request can contain events spanning days.
+    eventTimeMs: timestamp.timestamp,
+    // Historical events skip the live-session lookup so a backfill never joins
+    // the device's current session (see ids.ts).
+    isTimestampFromThePast: timestamp.isTimestampFromThePast,
   });
 
   return {
@@ -231,6 +262,7 @@ async function buildEventContext(
     headers: shared.requestHeaders,
     timestamp: {
       value: timestamp.timestamp,
+      isFromPast: timestamp.isTimestampFromThePast,
     },
     identity,
     deviceId: deviceIdResult.deviceId,
@@ -274,6 +306,7 @@ async function handleTrack(
       ...payload,
       groups: payload.groups ?? [],
       timestamp: timestamp.value,
+      isTimestampFromThePast: timestamp.isFromPast,
     },
     uaInfo,
     geo,
@@ -283,7 +316,7 @@ async function handleTrack(
 
   const partitionKey = groupId || generateId();
 
-  if (shouldUseKafka(projectId)) {
+  if (shouldUseKafka()) {
     promises.push(produceIncomingEvent(queueData, partitionKey));
   } else {
     promises.push(
@@ -375,17 +408,19 @@ async function handleDecrement(
   await adjustProfileProperty(payload, context.projectId, -1);
 }
 
-async function handleReplay(
+// Replay only needs the server-issued session id (the SDK echoes it back). Trust
+// it — scoped to the authed project, unguessable, same trust level as event data.
+export async function handleReplay(
   payload: IReplayPayload,
-  context: TrackContext
+  { projectId, sessionId }: { projectId: string; sessionId: string | undefined }
 ): Promise<void> {
-  if (!context.sessionId) {
+  if (!sessionId) {
     throw new HttpError('Session ID is required for replay', { status: 400 });
   }
 
   const row = {
-    project_id: context.projectId,
-    session_id: context.sessionId,
+    project_id: projectId,
+    session_id: sessionId,
     chunk_index: payload.chunk_index,
     started_at: payload.started_at,
     ended_at: payload.ended_at,
@@ -451,7 +486,13 @@ async function dispatchEvent(
       await handleDecrement(body.payload, context);
       return;
     case 'replay':
-      await handleReplay(body.payload, context);
+      // BACKCOMPAT(replay-sessionid): prefer the SDK-echoed sessionId, fall
+      // back to the server-derived one. TEMPORARY legacy branch — remove when
+      // the new SDK is fully deployed.
+      await handleReplay(body.payload, {
+        projectId: context.projectId,
+        sessionId: body.payload.sessionId ?? context.sessionId,
+      });
       return;
     case 'group':
       await handleGroup(body.payload, context);
@@ -671,39 +712,45 @@ export async function fetchDeviceId(
   });
 
   try {
-    const multi = getRedisCache().multi();
-    multi.hget(
-      `bull:sessions:sessionEnd:${projectId}:${currentDeviceId}`,
-      'data'
-    );
-    multi.hget(
-      `bull:sessions:sessionEnd:${projectId}:${previousDeviceId}`,
-      'data'
-    );
-    const res = await multi.exec();
-    if (res?.[0]?.[1]) {
-      const data = JSON.parse(res?.[0]?.[1] as string);
-      const sessionId = data.payload.sessionId;
+    const [current, previous] = await Promise.all([
+      sessionBuffer.getExistingSession({
+        projectId,
+        deviceId: currentDeviceId,
+      }),
+      sessionBuffer.getExistingSession({
+        projectId,
+        deviceId: previousDeviceId,
+      }),
+    ]);
+
+    // Blob has no TTL — only treat the session as "current" if its last
+    // event is within the idle window. Otherwise the SDK should ask the
+    // server to start a fresh session id on the next event.
+    const now = Date.now();
+    const isLive = (s: typeof current) =>
+      !!s &&
+      now - convertClickhouseDateToJs(s.ended_at).getTime() <
+        SESSION_TIMEOUT_MS;
+
+    if (current && isLive(current)) {
       return reply.status(200).send({
         deviceId: currentDeviceId,
-        sessionId,
+        sessionId: current.id,
         message: 'current session exists for this device id',
       });
     }
 
-    if (res?.[1]?.[1]) {
-      const data = JSON.parse(res?.[1]?.[1] as string);
-      const sessionId = data.payload.sessionId;
+    if (previous && isLive(previous)) {
       return reply.status(200).send({
         deviceId: previousDeviceId,
-        sessionId,
+        sessionId: previous.id,
         message: 'previous session exists for this device id',
       });
     }
   } catch (error) {
     request.log.error(
       { err: error },
-      'Error getting session end GET /track/device-id',
+      'Error getting session end GET /track/device-id'
     );
   }
 

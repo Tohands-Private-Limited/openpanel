@@ -9,7 +9,7 @@ import {
   gscQueue,
   importQueue,
   insightsQueue,
-  miscQueue,
+  isKafkaConfigured,
   notificationQueue,
   queueLogger,
   sessionsQueue,
@@ -28,7 +28,6 @@ import {
 import { gscJob } from './jobs/gsc';
 import { importJob } from './jobs/import';
 import { insightsProjectJob } from './jobs/insights';
-import { miscJob } from './jobs/misc';
 import { notificationJob } from './jobs/notification';
 import { sessionsJob } from './jobs/sessions';
 import { eventsGroupJobDuration } from './metrics';
@@ -43,7 +42,7 @@ const workerOptions: WorkerOptions = {
   connection: getRedisQueue(),
 };
 
-type QueueName = string; // Can be: events, events_N (where N is 0 to shards-1), sessions, cron, notification, misc
+type QueueName = string; // Can be: events, events_N (where N is 0 to shards-1), sessions, cron, notification
 
 /**
  * Parses the ENABLED_QUEUES environment variable and returns an array of queue names to start.
@@ -52,7 +51,7 @@ type QueueName = string; // Can be: events, events_N (where N is 0 to shards-1),
  * Supported queue names:
  * - events - All event shards (events_0, events_1, ..., events_N)
  * - events_N - Individual event shard (where N is 0 to EVENTS_GROUP_QUEUES_SHARDS-1)
- * - sessions, cron, notification, misc
+ * - sessions, cron, notification
  */
 function getEnabledQueues(): QueueName[] {
   const enabledQueuesEnv = process.env.ENABLED_QUEUES?.trim();
@@ -68,7 +67,6 @@ function getEnabledQueues(): QueueName[] {
       'sessions',
       'cron',
       'notification',
-      'misc',
       'import',
       'insights',
       'gsc',
@@ -112,10 +110,15 @@ export function bootWorkers() {
   const workers: (Worker | GroupWorker<any>)[] = [];
   const extraStops: Array<() => Promise<unknown>> = [];
 
-  // Start event workers based on enabled queues
+  // Start event workers based on enabled queues.
+  // When Kafka is configured the producer routes every event to Kafka, so the
+  // GroupMQ event shards would only poll an empty queue — skip them entirely
+  // and let the Kafka consumer handle ingestion.
   const eventQueuesToStart: number[] = [];
 
-  if (enabledQueues.includes('events')) {
+  if (isKafkaConfigured()) {
+    logger.info('Kafka is configured, skipping GroupMQ event workers');
+  } else if (enabledQueues.includes('events')) {
     // Start all event shards
     for (let i = 0; i < EVENTS_GROUP_QUEUES_SHARDS; i++) {
       eventQueuesToStart.push(i);
@@ -169,8 +172,9 @@ export function bootWorkers() {
     logger.info({ concurrency }, `Started worker for ${queueName}`);
   }
 
-  // Start Kafka events consumer (parallel to groupmq events for allow-listed project IDs)
-  if (enabledQueues.includes('events_kafka') && process.env.KAFKA_BROKERS) {
+  // Start Kafka events consumer. When Kafka is configured this fully replaces
+  // the GroupMQ event workers (which are skipped above).
+  if (enabledQueues.includes('events_kafka') && isKafkaConfigured()) {
     enableEventsHeartbeat();
     let handle: KafkaConsumerHandle | null = null;
     const startPromise = startKafkaEventsConsumer()
@@ -221,17 +225,6 @@ export function bootWorkers() {
     );
     workers.push(notificationWorker);
     logger.info({ concurrency }, 'Started worker for notification');
-  }
-
-  // Start misc worker
-  if (enabledQueues.includes('misc')) {
-    const concurrency = getConcurrencyFor('misc');
-    const miscWorker = new Worker(miscQueue.name, miscJob, {
-      ...workerOptions,
-      concurrency,
-    });
-    workers.push(miscWorker);
-    logger.info({ concurrency }, 'Started worker for misc');
   }
 
   // Start import worker
