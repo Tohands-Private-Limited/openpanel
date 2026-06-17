@@ -6,19 +6,16 @@ import {
   createEvent,
   getProjectByIdCached,
   matchEvent,
+  SESSION_TIMEOUT_MS,
   sessionBuffer,
 } from '@openpanel/db';
 import type { ILogger } from '@openpanel/logger';
 import type { EventsQueuePayloadIncomingEvent } from '@openpanel/queue';
 import { getLock } from '@openpanel/redis';
 import { anyPass, isEmpty, isNil, mergeDeepRight, omit, reject } from 'ramda';
+import { sessionEndsEnqueued, sessionsStarted } from '@/metrics';
 import { logger as baseLogger } from '@/utils/logger';
-import {
-  createSessionEndJob,
-  extendSessionEndJob,
-  getActiveSessionEndJob,
-  SESSION_TIMEOUT,
-} from '@/utils/session-handler';
+import { enqueueSessionEndV2 } from '@/utils/session-handler';
 
 /**
  * Acquire a Redis-backed lock that prevents duplicate session_start rows for
@@ -26,13 +23,13 @@ import {
  * the session_start row; false if another worker (or earlier event in the
  * same batch) already claimed it.
  *
- * TTL matches SESSION_TIMEOUT — a session can't extend beyond 30 min of
- * inactivity in the live mechanism, and the deterministic bucket is exactly
- * 30 min wide. By the time the lock TTL elapses, the session itself has
- * rolled.
+ * FORK: used only by the historical-reconstruction arm below (the live path
+ * dedups inside `sessionBuffer.ingest`). TTL matches `SESSION_TIMEOUT_MS` —
+ * the deterministic bucket is exactly that wide, so by the time the lock TTL
+ * elapses the session itself has rolled to a new bucket.
  *
- * Keyed on sessionId (not deviceId) so historical events from the same
- * device but different 30-min buckets each get their own session_start.
+ * Keyed on sessionId (not deviceId) so historical events from the same device
+ * but different buckets each get their own session_start.
  */
 async function acquireSessionStartLock(
   projectId: string,
@@ -44,19 +41,16 @@ async function acquireSessionStartLock(
   return getLock(
     `session_start:${projectId}:${sessionId}`,
     '1',
-    SESSION_TIMEOUT,
+    SESSION_TIMEOUT_MS,
   );
 }
 
 const GLOBAL_PROPERTIES = ['__path', '__referrer', '__timestamp', '__revenue'];
 
-// This function will merge two objects.
-// First it will strip '' and undefined/null from B
-// Then it will merge the two objects with a standard ramda merge function
+// Strip empty/nullish from B, then deep-merge over A.
 const merge = <A, B>(a: Partial<A>, b: Partial<B>): A & B =>
   mergeDeepRight(a, reject(anyPass([isEmpty, isNil]))(b)) as A & B;
 
-/** Check if payload matches project-level event exclude filters */
 async function isEventExcludedByProjectFilter(
   payload: IServiceCreateEventPayload,
   projectId: string
@@ -76,12 +70,11 @@ async function createEventAndNotify(
   logger: ILogger,
   projectId: string
 ) {
-  // Check project-level event exclude filters
   const isExcluded = await isEventExcludedByProjectFilter(payload, projectId);
   if (isExcluded) {
     logger.info(
       { event: payload.name, projectId },
-      'Event excluded by project filter',
+      'Event excluded by project filter'
     );
     return null;
   }
@@ -91,7 +84,6 @@ async function createEventAndNotify(
     createEvent(payload),
     checkNotificationRulesForEvent(payload).catch(() => null),
   ]);
-
   return event;
 }
 
@@ -104,16 +96,17 @@ const parseRevenue = (revenue: unknown): number | undefined => {
   }
   if (typeof revenue === 'string') {
     const parsed = Number.parseFloat(revenue);
-    if (Number.isNaN(parsed)) {
-      return undefined;
-    }
-    return parsed;
+    return Number.isNaN(parsed) ? undefined : parsed;
   }
   return undefined;
 };
 
 export async function incomingEvent(
-  jobPayload: EventsQueuePayloadIncomingEvent['payload']
+  jobPayload: EventsQueuePayloadIncomingEvent['payload'],
+  // Kafka delivery coordinates, when the event came through the Kafka consumer.
+  // Logged so a duplicate row in ClickHouse can be traced back to the exact
+  // partition/offset that produced it.
+  meta?: { partition: number; offset: string }
 ) {
   const {
     geo,
@@ -128,6 +121,9 @@ export async function incomingEvent(
   const reqId = headers['request-id'] ?? 'unknown';
   const logger = baseLogger.child({
     reqId,
+    ...(meta
+      ? { kafkaPartition: meta.partition, kafkaOffset: meta.offset }
+      : {}),
   });
   const getProperty = (name: string): string | undefined => {
     // replace thing is just for older sdks when we didn't have `__`
@@ -140,17 +136,12 @@ export async function incomingEvent(
     );
   };
 
-  // this will get the profileId from the alias table if it exists
   const profileId = body.profileId ? String(body.profileId) : '';
   const createdAt = new Date(body.timestamp);
-  // "Live" = the event is recent enough that it could plausibly belong to
-  // an active in-memory session. We use the same window as SESSION_TIMEOUT
-  // (30 min) so historical events never push the live sessionEnd job
-  // forward or create new live sessions. Server-side events are always
-  // treated as non-live (they get session enrichment from sessionBuffer
-  // when a profile is supplied; otherwise they keep the API-computed id).
-  const isLiveEvent =
-    !uaInfo.isServer && Date.now() - createdAt.getTime() <= SESSION_TIMEOUT;
+  // Historical = older than the API's 15-min cutoff (offline/late uploads).
+  // These don't extend or open a live session; the non-server reconstruction
+  // arm below rebuilds a session from the deterministic id instead.
+  const isTimestampFromThePast = body.isTimestampFromThePast;
   const url = getProperty('__path');
   const { path, hash, query, origin } = parsePath(url);
   const referrer = isSameDomain(getProperty('__referrer'), url)
@@ -200,14 +191,17 @@ export async function incomingEvent(
         : undefined,
   };
 
-  // Server-side events: when a profileId is supplied, enrich from the
-  // user's most recent browser session (deviceId, sessionId, geo, UA, path,
-  // referrer). Without a session, fall back to the API-computed identity.
-  // Server events never create or extend live sessions in Redis.
+  // Server-side events: when a profileId is supplied (and the event isn't
+  // historical), enrich from the user's most recent browser session (deviceId,
+  // sessionId, geo, UA, path, referrer). Without a session, fall back to the
+  // API-computed identity. Server events never create or extend live sessions.
+  // Past server events are NOT enriched — they keep the deterministic id the
+  // edge minted, matching the live-session idle semantics.
   if (uaInfo.isServer) {
-    const enrichment = profileId
-      ? await sessionBuffer.getExistingSession({ profileId, projectId })
-      : null;
+    const enrichment =
+      profileId && !isTimestampFromThePast
+        ? await sessionBuffer.getExistingSession({ profileId, projectId })
+        : null;
 
     const payload: IServiceCreateEventPayload = enrichment
       ? {
@@ -238,103 +232,95 @@ export async function incomingEvent(
     return createEventAndNotify(payload, logger, projectId);
   }
 
-  const activeSessionEndJob = await getActiveSessionEndJob(
-    projectId,
-    deviceId,
-  );
-  const activeSessionPayload = activeSessionEndJob?.data.payload;
-
-  const payload: IServiceCreateEventPayload = merge(baseEvent, {
-    referrer: activeSessionPayload?.referrer ?? baseEvent.referrer,
-    referrerName: activeSessionPayload?.referrerName ?? baseEvent.referrerName,
-    referrerType: activeSessionPayload?.referrerType ?? baseEvent.referrerType,
-  } as Partial<IServiceCreateEventPayload>) as IServiceCreateEventPayload;
-
-  const isExcluded = await isEventExcludedByProjectFilter(payload, projectId);
-  if (isExcluded) {
+  if (await isEventExcludedByProjectFilter(baseEvent, projectId)) {
     logger.info(
-      { event: payload.name, projectId },
-      'Skipping session_start and event (excluded by project filter)',
+      { event: baseEvent.name, projectId },
+      'Skipping session_start and event (excluded by project filter)'
     );
     return null;
   }
 
-  // Historical (buffered) events: the API has already computed a
-  // deterministic sessionId for them. Write the event and emit one
-  // session_start per bucket (Redis lock dedups across batches and
-  // workers). Do NOT touch live session state — historical events
-  // must not extend the user's current session or schedule a 30-min
-  // sessionEnd timer.
-  if (!isLiveEvent) {
+  // FORK: non-server historical / late-uploaded events (offline-first SDKs).
+  // The API has already minted a deterministic, timestamp-bucketed sessionId
+  // for them (it skipped the live-session lookup — see ids.ts). Reconstruct the
+  // session: emit one session_start per (project, sessionId) bucket, deduped by
+  // a Redis lock so parallel batch events / workers don't double-insert. Do NOT
+  // touch live session state (no sessionBuffer.ingest, no sessionEnd) — a
+  // backfill must not extend or close the user's current session.
+  if (isTimestampFromThePast) {
     if (await acquireSessionStartLock(projectId, sessionId)) {
       await createEventAndNotify(
         {
-          ...payload,
+          ...baseEvent,
           name: 'session_start',
-          createdAt: new Date(getTime(payload.createdAt) - 100),
+          createdAt: new Date(getTime(baseEvent.createdAt) - 100),
         },
         logger,
         projectId,
       ).catch((error) => {
         logger.error(
-          { err: error, event: payload },
+          { err: error, event: baseEvent },
           'Error creating historical session start event',
         );
-        // Don't throw — historical session_start is best-effort. The
-        // event itself should still land.
+        // Best-effort — the event itself should still land.
       });
     }
-    return createEventAndNotify(payload, logger, projectId);
+    return createEventAndNotify(baseEvent, logger, projectId);
   }
 
-  if (activeSessionEndJob) {
-    await extendSessionEndJob({
-      projectId,
-      deviceId,
-      job: activeSessionEndJob,
-    }).catch((error) => {
-      logger.warn({ err: error }, 'Failed to extend session end job');
-    });
-  } else if (await acquireSessionStartLock(projectId, sessionId)) {
-    // Lock prevents the previously-observed batch race: when N events for
-    // the same device land in the API in parallel, all see no Redis
-    // sessionEnd key yet, all queue with session: undefined, and would
-    // each try to emit session_start. The lock collapses them to one.
+  // Live path. `sessionBuffer.ingest` is the single source of truth for session
+  // lifecycle: reads the current session, decides extend/new/boundary, writes
+  // back. The returned `current` is the canonical session — use its referrer
+  // fields for inheritance.
+  const session = await sessionBuffer.ingest(baseEvent);
+
+  if (session?.kind === 'boundary') {
+    // Close the old session in a separate job (one Redis-buffered insert for
+    // the session_end event + notification rule check). Idempotent via BullMQ
+    // jobId dedup.
+    await enqueueSessionEndV2({
+      payload: baseEvent,
+      closedSession: session.closed,
+    })
+      .then(() => sessionEndsEnqueued.inc({ source: 'boundary' }))
+      .catch((error) => {
+        logger.error(
+          { err: error, deviceId, sessionId: session.closed.id },
+          'Error enqueueing session_end on boundary'
+        );
+      });
+  }
+
+  if (session?.kind === 'new' || session?.kind === 'boundary') {
+    sessionsStarted.inc({ kind: session.kind });
     await createEventAndNotify(
       {
-        ...payload,
+        ...baseEvent,
         name: 'session_start',
-        createdAt: new Date(getTime(payload.createdAt) - 100),
+        createdAt: new Date(getTime(baseEvent.createdAt) - 100),
       },
       logger,
       projectId
     ).catch((error) => {
       logger.error(
-        { err: error, event: payload },
-        'Error creating session start event',
+        { err: error, event: baseEvent },
+        'Error creating session start event'
       );
       throw error;
-    });
-
-    await createSessionEndJob({ payload }).catch((error) => {
-      logger.error(
-        { err: error, event: payload },
-        'Error creating session end job',
-      );
-      throw error;
-    });
-  } else {
-    // Another worker (or earlier event in this batch) claimed the
-    // session_start. Still ensure a sessionEnd is scheduled so the
-    // session closes cleanly. createSessionEndJob is idempotent on
-    // jobId, so this is a no-op when the job already exists.
-    await createSessionEndJob({ payload }).catch((error) => {
-      logger.warn(
-        { err: error, event: payload },
-        'Failed to schedule session end job (lock not acquired)',
-      );
     });
   }
 
-  return createEventAndNotify(payload, logger, projectId);
+  // Inherit referrer fields from the canonical session for the actual event.
+  // For 'extend' this preserves the original session's referrer across
+  // mid-session events; for 'new' / 'boundary' it's the event's own referrer
+  // (which `ingest` just stored on the fresh session).
+  const finalPayload: IServiceCreateEventPayload = session
+    ? merge(baseEvent, {
+        referrer: session.current.referrer,
+        referrerName: session.current.referrer_name,
+        referrerType: session.current.referrer_type,
+      } as Partial<IServiceCreateEventPayload>)
+    : baseEvent;
+
+  return createEventAndNotify(finalPayload, logger, projectId);
 }

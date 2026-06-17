@@ -18,38 +18,62 @@ upstream merges batch support, clients need no changes.
 
 ## Permanent fork differences
 
+These are deliberate divergences upstream is **not** expected to adopt — keep
+our side on every sync.
+
 - `.github/workflows/docker-build.yml` — our Docker build/publish pipeline
-  (triggers on develop/staging/main). Keep our side on upstream syncs.
+  (triggers on develop/staging/main).
 - `FORK-PATCHES.md` (this file).
+
+### Historical-event session reconstruction
+
+As of the upstream **#393** session-management sync we **adopt upstream's
+`sessionBuffer.ingest` lifecycle** for live traffic (the old BullMQ
+`createSessionEndJob`/`getActiveSessionEndJob` mechanism is gone). On top of it
+we keep one deliberate product difference: **late / offline-uploaded events
+reconstruct a real session**, whereas upstream deliberately suppresses session
+creation for anything older than 15 minutes ("no artificial sessions from
+historical imports"). Offline-first SDKs (Flutter / LVGL on embedded devices)
+upload genuinely past user sessions, and those must appear as sessions in
+analytics — so the two will not converge.
+
+An event is "historical" when the API flags `isTimestampFromThePast` (its
+`__timestamp` is > 15 min old). Files carrying the divergence:
+
+- `apps/api/src/controllers/track.controller.ts` — `getTimestamp` keeps the
+  fork's 5-day hard floor (throws 400) layered on upstream's 15-min
+  `isTimestampFromThePast`; threads the flag + `eventTimeMs` into `getDeviceId`
+  and the queue payload.
+- `apps/api/src/controllers/event.controller.ts` — deprecated `/event` threads
+  the same flag + `eventTimeMs`.
+- `apps/api/src/utils/ids.ts` — fork `isTimestampFromThePast` param that
+  **skips the live-session lookup** for historical events, so a backfill gets a
+  deterministic timestamp-bucketed id instead of joining the device's live
+  session.
+- `packages/queue/src/queues.ts` — `isTimestampFromThePast` on the
+  incoming-event payload (the worker's reconstruction arm reads it). NOTE: a
+  prior fork patch *dropped* this field; the #393 sync re-adds it — do not drop
+  it again.
+- `apps/worker/src/jobs/events.incoming-event.ts` — the reconstruction arm:
+  for a non-server historical event, emit one `session_start` per
+  `(project, sessionId)` bucket (Redis-lock dedup via `acquireSessionStartLock`)
+  and write the event **without** touching live session state (no
+  `sessionBuffer.ingest`, no `sessionEnd`). Also stamps a `__syncedAt`
+  processing timestamp on every event.
+- Tests: `apps/api/src/utils/ids.test.ts` (skip-lookup),
+  `apps/api/src/controllers/track.controller.test.ts` (`getTimestamp`),
+  `apps/worker/src/jobs/events.incoming-events.test.ts` (reconstruction arm).
+
+**On future upstream syncs:** take upstream's `packages/db` session-buffer,
+`ids.ts` live-lookup, and worker live-path changes wholesale, then re-apply the
+fork hooks above (5-day floor, `ids.ts` skip-lookup, the worker reconstruction
+arm + `__syncedAt`, and the queue `isTimestampFromThePast` field). Re-run
+`ids.test.ts`, `track.controller.test.ts`, `events.incoming-events.test.ts`,
+and `track-batch.router.test.ts`.
 
 ## Temporary patches
 
-### 1. Worker-side historical-event/session handling
-
-Upstream's session management is wall-clock dependent; the maintainer is
-reworking it (see PR #377 discussion, 2026-06-04). Until that lands, we carry
-our own implementation:
-
-- `apps/worker/src/jobs/events.incoming-event.ts` — deterministic
-  session handling for historical events, Redis-lock dedup of
-  `session_start`, live-vs-historical event split
-- `apps/worker/src/jobs/events.incoming-events.test.ts` — tests for the above
-- `apps/api/src/utils/ids.ts` — deterministic 30-min session bucketing keyed
-  on the event's own `__timestamp` (`eventMs`)
-- `packages/queue/src/queues.ts` — dropped `isTimestampFromThePast` from the
-  queue payload (replaced by the worker's own live/historical detection)
-- `apps/api/src/controllers/event.controller.ts` — passes `eventMs`,
-  no longer forwards `isTimestampFromThePast`
-- 5-day hard floor for historical timestamps in
-  `apps/api/src/controllers/track.controller.ts` (`getTimestamp` throws 400)
-
-**On upstream sync:** when upstream's session rework lands, resolve conflicts
-in these files by taking upstream's side wholesale, then re-run
-`apps/api/src/routes/track-batch.router.test.ts` and
-`apps/worker/src/jobs/events.incoming-events.test.ts` and re-validate
-historical-event ingestion end to end.
-
-### 2. Deprecated `POST /track/batch` route
+### 1. Deprecated `POST /track/batch` route
 
 `apps/api/src/routes/track.router.ts` keeps `/track/batch`
 (body `{ "events": [...] }`) as a deprecated alias for clients shipped before

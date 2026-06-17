@@ -2,7 +2,12 @@ import { generateId } from '@openpanel/common';
 import { parseUserAgent } from '@openpanel/common/server';
 import { getSalts } from '@openpanel/db';
 import { getGeoLocation } from '@openpanel/geo';
-import { getEventsGroupQueueShard } from '@openpanel/queue';
+import {
+  type EventsQueuePayloadIncomingEvent,
+  getEventsGroupQueueShard,
+  produceIncomingEvent,
+  shouldUseKafka,
+} from '@openpanel/queue';
 import type { DeprecatedPostEventPayload } from '@openpanel/validation';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { getStringHeaders, getTimestamp } from './track.controller';
@@ -14,7 +19,10 @@ export async function postEvent(
   }>,
   reply: FastifyReply
 ) {
-  const { timestamp } = getTimestamp(request.timestamp, request.body);
+  const { timestamp, isTimestampFromThePast } = getTimestamp(
+    request.timestamp,
+    request.body
+  );
   const ip = request.clientIp;
   const ua = request.headers['user-agent'] ?? 'unknown/1.0';
   const projectId = request.client?.projectId;
@@ -31,29 +39,37 @@ export async function postEvent(
     ip,
     ua,
     salts,
-    eventMs: new Date(timestamp).getTime(),
+    eventTimeMs: new Date(timestamp).getTime(),
+    isTimestampFromThePast,
   });
 
   const uaInfo = parseUserAgent(ua, request.body?.properties);
   const groupId = uaInfo.isServer
     ? `${projectId}:${request.body?.profileId ?? generateId()}`
     : deviceId;
-  await getEventsGroupQueueShard(groupId).add({
-    orderMs: new Date(timestamp).getTime(),
-    data: {
-      projectId,
-      headers,
-      event: {
-        ...request.body,
-        timestamp,
-      },
-      uaInfo,
-      geo,
-      deviceId,
-      sessionId: sessionId ?? '',
+  const queueData: EventsQueuePayloadIncomingEvent['payload'] = {
+    projectId,
+    headers,
+    event: {
+      ...request.body,
+      timestamp,
+      isTimestampFromThePast,
     },
-    groupId,
-  });
+    uaInfo,
+    geo,
+    deviceId,
+    sessionId: sessionId ?? '',
+  };
+
+  if (shouldUseKafka()) {
+    await produceIncomingEvent(queueData, groupId);
+  } else {
+    await getEventsGroupQueueShard(groupId).add({
+      orderMs: new Date(timestamp).getTime(),
+      data: queueData,
+      groupId,
+    });
+  }
 
   reply.status(202).send('ok');
 }
