@@ -136,6 +136,51 @@ export function useColumns() {
       },
     },
     {
+      id: 'profileIdRaw',
+      accessorFn: (row) => row.profile?.id ?? row.profileId,
+      header: 'Profile ID',
+      size: 220,
+      meta: {
+        hidden: true,
+      },
+      cell({ row }) {
+        const { profile, profileId } = row.original;
+        const id = profile?.id ?? profileId;
+        if (!id) {
+          return null;
+        }
+        return (
+          <ProjectLink
+            className="block truncate whitespace-nowrap font-mono text-sm hover:underline"
+            href={`/profiles/${encodeURIComponent(id)}`}
+            title={id}
+          >
+            {id}
+          </ProjectLink>
+        );
+      },
+    },
+    {
+      id: 'mobile_no',
+      accessorFn: (row) => row.profile?.properties?.mobile_no,
+      header: 'Mobile',
+      size: 160,
+      meta: {
+        hidden: true,
+      },
+      cell({ row }) {
+        const mobile = row.original.profile?.properties?.mobile_no;
+        if (!mobile) {
+          return null;
+        }
+        return (
+          <span className="block truncate whitespace-nowrap font-mono text-sm">
+            {String(mobile)}
+          </span>
+        );
+      },
+    },
+    {
       accessorKey: 'sessionId',
       header: 'Session ID',
       size: 100,

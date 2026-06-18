@@ -25,6 +25,23 @@ our side on every sync.
   (triggers on develop/staging/main).
 - `FORK-PATCHES.md` (this file).
 
+### Events-table identity columns (Profile ID + Mobile)
+
+`apps/start/src/components/events/table/columns.tsx` adds two opt-in
+(hidden-by-default) columns to the events table, both surfaced through the
+existing column-visibility ("View") menu and persisted per-user in localStorage:
+
+- **Profile ID** (`id: 'profileIdRaw'`) — renders the raw `profile.id`
+  (falls back to the event's `profileId`) as a link to the profile. Distinct
+  column `id` because the existing "Profile" column already owns
+  `accessorKey: 'profileId'`.
+- **Mobile** (`id: 'mobile_no'`) — renders `profile.properties.mobile_no`, a
+  ToHands-specific custom trait sent via `identify` (OpenPanel has no
+  first-class phone/mobile field; it lives in the profile `properties` map).
+
+Upstream is not expected to add a `mobile_no` column (fork-specific business
+field), so re-apply both on every sync.
+
 ### Historical-event session reconstruction
 
 As of the upstream **#393** session-management sync we **adopt upstream's
