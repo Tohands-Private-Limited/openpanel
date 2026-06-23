@@ -37,7 +37,11 @@ export function SankeyLabelBy({ value }: SankeyLabelByProps) {
   };
 
   const addRule = () => {
-    setRules([...value, { event: '', property: '' }]);
+    // Default new rows to `path` (the common screen_view case); the event
+    // starts empty for the user to pick. Incomplete rules are already valid
+    // (zSankeyLabelRule accepts them, buildSankeyLabelExpr skips them), so this
+    // is a UX nicety — one fewer click for the typical flow — not a bug fix.
+    setRules([...value, { event: '', property: 'path' }]);
   };
 
   // Content-based keys (with an occurrence counter so duplicate/empty rows stay
