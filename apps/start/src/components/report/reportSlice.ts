@@ -18,6 +18,7 @@ import type {
   IInterval,
   IReport,
   IReportOptions,
+  ISankeyLabelRule,
   UnionOmit,
   zCriteria,
 } from '@openpanel/validation';
@@ -209,13 +210,16 @@ export const reportSlice = createSlice({
       state.dirty = true;
       state.chartType = action.payload;
 
-      // Initialize sankey options if switching to sankey
+      // Initialize sankey options if switching to sankey. Seed a screen_view →
+      // path label rule so the flow renders per-screen nodes out of the box
+      // (the common mobile-analytics case) instead of one collapsed node.
       if (action.payload === 'sankey' && !state.options) {
         state.options = {
           type: 'sankey',
           mode: 'after',
           steps: 5,
           exclude: [],
+          labelBy: [{ event: 'screen_view', property: 'path' }],
         };
       }
 
@@ -341,6 +345,7 @@ export const reportSlice = createSlice({
           mode: action.payload,
           steps: 5,
           exclude: [],
+          labelBy: [],
         };
       } else if (state.options.type === 'sankey') {
         state.options.mode = action.payload;
@@ -354,6 +359,7 @@ export const reportSlice = createSlice({
           mode: 'after',
           steps: action.payload,
           exclude: [],
+          labelBy: [],
         };
       } else if (state.options.type === 'sankey') {
         state.options.steps = action.payload;
@@ -367,6 +373,7 @@ export const reportSlice = createSlice({
           mode: 'after',
           steps: 5,
           exclude: action.payload,
+          labelBy: [],
         };
       } else if (state.options.type === 'sankey') {
         state.options.exclude = action.payload;
@@ -381,9 +388,24 @@ export const reportSlice = createSlice({
           steps: 5,
           exclude: [],
           include: action.payload,
+          labelBy: [],
         };
       } else if (state.options.type === 'sankey') {
         state.options.include = action.payload;
+      }
+    },
+    changeSankeyLabelBy(state, action: PayloadAction<ISankeyLabelRule[]>) {
+      state.dirty = true;
+      if (!state.options) {
+        state.options = {
+          type: 'sankey',
+          mode: 'after',
+          steps: 5,
+          exclude: [],
+          labelBy: action.payload,
+        };
+      } else if (state.options.type === 'sankey') {
+        state.options.labelBy = action.payload;
       }
     },
     changeStacked(state, action: PayloadAction<boolean>) {
@@ -452,6 +474,7 @@ export const {
   changeSankeySteps,
   changeSankeyExclude,
   changeSankeyInclude,
+  changeSankeyLabelBy,
   changeStacked,
   reorderEvents,
   changeVisibleSeries,
