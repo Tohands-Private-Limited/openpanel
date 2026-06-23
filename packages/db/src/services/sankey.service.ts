@@ -1,9 +1,18 @@
 import { chartColors } from '@openpanel/constants';
-import { type IChartEventFilter, zChartEvent } from '@openpanel/validation';
+import {
+  type IChartEventFilter,
+  isEventLevelProperty,
+  zChartEvent,
+  zSankeyLabelRule,
+} from '@openpanel/validation';
 import { z } from 'zod';
 import { TABLE_NAMES, ch } from '../clickhouse/client';
 import { clix } from '../clickhouse/query-builder';
-import { getEventFiltersWhereClause } from './chart.service';
+import {
+  getEventFiltersWhereClause,
+  getSelectPropertyKey,
+  isKnownEventField,
+} from './chart.service';
 
 export const zGetSankeyInput = z.object({
   projectId: z.string(),
@@ -15,11 +24,50 @@ export const zGetSankeyInput = z.object({
   endEvent: zChartEvent.optional(),
   exclude: z.array(z.string()).default([]),
   include: z.array(z.string()).optional(),
+  labelBy: z.array(zSankeyLabelRule).default([]),
 });
 
 export type IGetSankeyInput = z.infer<typeof zGetSankeyInput> & {
   timezone: string;
 };
+
+/**
+ * Build the SQL expression that derives each event's node *label*.
+ *
+ * For every rule the matching event is relabeled by the resolved property value
+ * (e.g. `screen_view` → its `path`), so a single collapsed `screen_view` node
+ * fans out into one node per screen. Events without a rule keep their event
+ * name. A missing/empty property value falls back to the event name so we never
+ * emit a blank node.
+ *
+ * Only event-level properties are supported (`getSelectPropertyKey` against the
+ * events table); the flow query has no profile/group JOIN to resolve other
+ * dimensions.
+ */
+export function buildSankeyLabelExpr(
+  labelBy: z.infer<typeof zSankeyLabelRule>[],
+  projectId: string,
+): string {
+  const branches = (labelBy ?? [])
+    // Skip incomplete rules, properties needing a JOIN the flow query lacks
+    // (isEventLevelProperty), and unknown columns that would reach
+    // getSelectPropertyKey and fail at query time with UNKNOWN_IDENTIFIER
+    // (isKnownEventField, as getChartSql does). This is the only guard on the
+    // getUserFlowCore path, which bypasses the zSankeyOptions refine.
+    .filter(
+      (rule) =>
+        rule.event &&
+        rule.property &&
+        isEventLevelProperty(rule.property) &&
+        isKnownEventField(rule.property),
+    )
+    .map((rule) => {
+      const valueExpr = getSelectPropertyKey(rule.property, projectId);
+      const escapedEvent = rule.event.replace(/'/g, "''");
+      return `name = '${escapedEvent}', if(empty(toString(${valueExpr})), name, toString(${valueExpr}))`;
+    });
+  return branches.length ? `multiIf(${branches.join(', ')}, name)` : 'name';
+}
 
 export class SankeyService {
   constructor(private client: typeof ch) {}
@@ -105,8 +153,8 @@ export class SankeyService {
       const escapedStartEvent = startEvent.name.replace(/'/g, "''");
       const sessionFilter = hasStartEventCTE
         ? 'session_id IN (SELECT session_id FROM start_event_sessions)'
-        : `arrayExists(x -> x = '${escapedStartEvent}', events_deduped)`;
-      const eventsSliceExpr = `arraySlice(events_deduped, arrayFirstIndex(x -> x = '${escapedStartEvent}', events_deduped), ${steps})`;
+        : `arrayExists(x -> x.1 = '${escapedStartEvent}', events_deduped)`;
+      const eventsSliceExpr = `arraySlice(events_deduped, arrayFirstIndex(x -> x.1 = '${escapedStartEvent}', events_deduped), ${steps})`;
       return { sessionFilter, eventsSliceExpr };
     }
 
@@ -114,11 +162,11 @@ export class SankeyService {
       const escapedStartEvent = startEvent.name.replace(/'/g, "''");
       const sessionFilter = hasStartEventCTE
         ? 'session_id IN (SELECT session_id FROM start_event_sessions)'
-        : `arrayExists(x -> x = '${escapedStartEvent}', events_deduped)`;
+        : `arrayExists(x -> x.1 = '${escapedStartEvent}', events_deduped)`;
       const eventsSliceExpr = `arraySlice(
         events_deduped,
-        greatest(1, arrayFirstIndex(x -> x = '${escapedStartEvent}', events_deduped) - ${steps} + 1),
-        arrayFirstIndex(x -> x = '${escapedStartEvent}', events_deduped) - greatest(1, arrayFirstIndex(x -> x = '${escapedStartEvent}', events_deduped) - ${steps} + 1) + 1
+        greatest(1, arrayFirstIndex(x -> x.1 = '${escapedStartEvent}', events_deduped) - ${steps} + 1),
+        arrayFirstIndex(x -> x.1 = '${escapedStartEvent}', events_deduped) - greatest(1, arrayFirstIndex(x -> x.1 = '${escapedStartEvent}', events_deduped) - ${steps} + 1) + 1
       )`;
       return { sessionFilter, eventsSliceExpr };
     }
@@ -131,11 +179,11 @@ export class SankeyService {
         sessionFilter =
           'session_id IN (SELECT session_id FROM start_event_sessions) AND session_id IN (SELECT session_id FROM end_event_sessions)';
       } else if (hasStartEventCTE) {
-        sessionFilter = `session_id IN (SELECT session_id FROM start_event_sessions) AND arrayExists(x -> x = '${escapedEndEvent}', events_deduped)`;
+        sessionFilter = `session_id IN (SELECT session_id FROM start_event_sessions) AND arrayExists(x -> x.1 = '${escapedEndEvent}', events_deduped)`;
       } else if (hasEndEventCTE) {
-        sessionFilter = `arrayExists(x -> x = '${escapedStartEvent}', events_deduped) AND session_id IN (SELECT session_id FROM end_event_sessions)`;
+        sessionFilter = `arrayExists(x -> x.1 = '${escapedStartEvent}', events_deduped) AND session_id IN (SELECT session_id FROM end_event_sessions)`;
       } else {
-        sessionFilter = `arrayExists(x -> x = '${escapedStartEvent}', events_deduped) AND arrayExists(x -> x = '${escapedEndEvent}', events_deduped)`;
+        sessionFilter = `arrayExists(x -> x.1 = '${escapedStartEvent}', events_deduped) AND arrayExists(x -> x.1 = '${escapedEndEvent}', events_deduped)`;
       }
       return { sessionFilter, eventsSliceExpr: defaultSliceExpr };
     }
@@ -166,14 +214,17 @@ export class SankeyService {
       .with('session_paths', sessionPathsQuery)
       .select<{
         session_id: string;
-        events: string[];
+        events: Array<[string, string]>;
         start_index: number;
         end_index: number;
       }>([
         'session_id',
         'events',
-        `arrayFirstIndex(x -> x = '${startEvent.name.replace(/'/g, "''")}', events) as start_index`,
-        `arrayFirstIndex(x -> x = '${endEvent.name.replace(/'/g, "''")}', events) as end_index`,
+        // Anchor on the event NAME (tuple element .1), not the display label,
+        // so anchoring on e.g. `screen_view` still works when its nodes render
+        // as per-screen paths.
+        `arrayFirstIndex(x -> x.1 = '${startEvent.name.replace(/'/g, "''")}', events) as start_index`,
+        `arrayFirstIndex(x -> x.1 = '${endEvent.name.replace(/'/g, "''")}', events) as end_index`,
       ])
       .from('session_paths')
       .having('start_index', '>', 0)
@@ -185,12 +236,13 @@ export class SankeyService {
       .with('between_sessions', betweenSessionsQuery)
       .select<{
         session_id: string;
-        events: string[];
+        events: Array<[string, string]>;
         entry_event: string;
       }>([
         'session_id',
         'arraySlice(events, start_index, end_index - start_index + 1) as events',
-        'events[start_index] as entry_event',
+        // Entry node identity is the display label (tuple element .2).
+        'events[start_index].2 as entry_event',
       ])
       .from('between_sessions');
 
@@ -226,7 +278,7 @@ export class SankeyService {
             'arraySlice(events, start_index, end_index - start_index + 1) as events',
           ])
           .from('between_sessions')
-          .having('events[1]', 'IN', topEntryEvents),
+          .having('events[1].2', 'IN', topEntryEvents),
       )
       .select<{
         source: string;
@@ -241,7 +293,7 @@ export class SankeyService {
       ])
       .from(
         clix.exp(
-          '(SELECT arrayJoin(arrayMap(i -> (events[i], events[i + 1], i), range(1, length(events)))) as pair FROM session_paths WHERE length(events) >= 2)',
+          '(SELECT arrayJoin(arrayMap(i -> (events[i].2, events[i + 1].2, i), range(1, length(events)))) as pair FROM session_paths WHERE length(events) >= 2)',
         ),
       )
       .groupBy(['source', 'target', 'step'])
@@ -304,7 +356,7 @@ export class SankeyService {
         clix(this.client, timezone)
           .select(['session_id', 'events'])
           .from('session_paths_base')
-          .having('events[1]', 'IN', topEntryEvents),
+          .having('events[1].2', 'IN', topEntryEvents),
       )
       .select<{
         source: string;
@@ -319,7 +371,7 @@ export class SankeyService {
       ])
       .from(
         clix.exp(
-          '(SELECT arrayJoin(arrayMap(i -> (events[i], events[i + 1], i), range(1, length(events)))) as pair FROM session_paths WHERE length(events) >= 2)',
+          '(SELECT arrayJoin(arrayMap(i -> (events[i].2, events[i + 1].2, i), range(1, length(events)))) as pair FROM session_paths WHERE length(events) >= 2)',
         ),
       )
       .groupBy(['source', 'target', 'step'])
@@ -347,6 +399,7 @@ export class SankeyService {
     endEvent,
     exclude = [],
     include,
+    labelBy = [],
     timezone,
   }: IGetSankeyInput): Promise<{
     nodes: Array<{
@@ -369,17 +422,22 @@ export class SankeyService {
       endEvent?.name,
     );
 
-    // 2. Build ordered events query
-    // For screen_view events, use the path instead of the event name for more meaningful flow visualization
+    // 2. Build ordered events query.
+    // Each row carries both the raw event `name` (used for anchoring/filtering)
+    // and a derived `label` (used for node identity/display). With a `labelBy`
+    // rule the label becomes a property value (e.g. screen_view → its path);
+    // otherwise it equals the event name.
+    const labelExpr = buildSankeyLabelExpr(labelBy, projectId);
     const orderedEventsQuery = clix(this.client, timezone)
       .select<{
         session_id: string;
-        event_name: string;
+        name: string;
+        label: string;
         created_at: string;
       }>([
         'session_id',
-        // "if(name = 'screen_view', path, name) as event_name",
-        'name as event_name',
+        'name',
+        `${labelExpr} as label`,
         'created_at',
       ])
       .from(TABLE_NAMES.events)
@@ -417,16 +475,19 @@ export class SankeyService {
         : null;
 
     // 4. Build deduped events CTE
+    // Collapse consecutive events that share the same display *label* (tuple
+    // element .2). Each element is a (name, label) tuple so downstream steps can
+    // anchor on the name while building nodes from the label.
     const eventsDedupedCTE = clix(this.client, timezone)
       .with('ordered_events', orderedEventsQuery)
       .select<{
         session_id: string;
-        events_deduped: string[];
+        events_deduped: Array<[string, string]>;
       }>([
         'session_id',
         `arrayFilter(
-          (x, i) -> i = 1 OR x != events_raw[i - 1],
-          groupArray(event_name) as events_raw,
+          (x, i) -> i = 1 OR x.2 != events_raw[i - 1].2,
+          groupArray((name, label)) as events_raw,
           arrayEnumerate(events_raw)
         ) as events_deduped`,
       ])
@@ -445,12 +506,12 @@ export class SankeyService {
 
     // 6. Build truncate expression (for 'after' mode)
     const truncateAtRepeatExpr = `if(
-      arrayFirstIndex(x -> x > 1, arrayEnumerateUniq(events_sliced)) = 0,
+      arrayFirstIndex(x -> x > 1, arrayEnumerateUniq(arrayMap(t -> t.2, events_sliced))) = 0,
       events_sliced,
       arraySlice(
         events_sliced,
         1,
-        arrayFirstIndex(x -> x > 1, arrayEnumerateUniq(events_sliced)) - 1
+        arrayFirstIndex(x -> x > 1, arrayEnumerateUniq(arrayMap(t -> t.2, events_sliced))) - 1
       )
     )`;
     const eventsExpr =
@@ -477,7 +538,7 @@ export class SankeyService {
         clix(this.client, timezone)
           .select<{
             session_id: string;
-            events_sliced: string[];
+            events_sliced: Array<[string, string]>;
           }>(['session_id', `${eventsSliceExpr} as events_sliced`])
           .from('events_deduped_cte')
           .rawHaving(sessionFilter || '1 = 1'),
@@ -485,8 +546,8 @@ export class SankeyService {
       .select<{
         session_id: string;
         entry_event: string;
-        events: string[];
-      }>(['session_id', `${eventsExpr} as events`, 'events[1] as entry_event'])
+        events: Array<[string, string]>;
+      }>(['session_id', `${eventsExpr} as events`, 'events[1].2 as entry_event'])
       .from('events_sliced_cte')
       .having('length(events)', '>=', 2);
 
@@ -805,6 +866,7 @@ export async function getUserFlowCore(input: {
   steps?: number;
   exclude?: string[];
   include?: string[];
+  labelBy?: { event: string; property: string }[];
 }) {
   if (input.mode === 'between' && !input.endEvent) {
     throw new Error('endEvent is required when mode is "between"');
@@ -821,6 +883,7 @@ export async function getUserFlowCore(input: {
     endEvent: input.endEvent ? toChartEvent(input.endEvent) : undefined,
     exclude: input.exclude ?? [],
     include: input.include,
+    labelBy: input.labelBy ?? [],
     timezone,
   });
 

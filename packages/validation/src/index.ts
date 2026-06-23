@@ -167,12 +167,41 @@ export const zRetentionOptions = z.object({
   criteria: zCriteria.optional(),
 });
 
+// A property is "event-level" — resolvable in the flow query, which selects
+// only from the events table with no profile/group/cohort JOIN — when it is a
+// top-level event column (e.g. `path`) or lives in the `properties` map.
+// `profile.*`, `group.*`, and `cohort:*` dimensions need a JOIN the flow query
+// does not have, so they would generate SQL referencing a missing alias.
+export function isEventLevelProperty(property: string): boolean {
+  return (
+    !property.startsWith('profile.') &&
+    !property.startsWith('group.') &&
+    !property.startsWith('cohort:')
+  );
+}
+
+// A single node-labeling rule for the Sankey/flow report: relabel a specific
+// event by one of its EVENT-LEVEL properties (top-level columns such as `path`
+// or `properties.*`) instead of grouping by the event name. Profile/group/cohort
+// dimensions are rejected here (not just hidden in the UI) so a raw API call
+// can't push a join-requiring property into the flow query. Events without a
+// matching rule keep using their event name.
+export const zSankeyLabelRule = z.object({
+  event: z.string(),
+  property: z.string().refine(isEventLevelProperty, {
+    message:
+      'Sankey node labels only support event-level properties (top-level columns or properties.*), not profile/group/cohort dimensions',
+  }),
+});
+export type ISankeyLabelRule = z.infer<typeof zSankeyLabelRule>;
+
 export const zSankeyOptions = z.object({
   type: z.literal('sankey'),
   mode: z.enum(['between', 'after', 'before']),
   steps: z.number().min(2).max(10).default(5),
   exclude: z.array(z.string()).default([]),
   include: z.array(z.string()).optional(),
+  labelBy: z.array(zSankeyLabelRule).default([]),
 });
 
 export const zHistogramOptions = z.object({

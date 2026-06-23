@@ -551,6 +551,7 @@ export const chartRouter = createTRPCRouter({
       endEvent: eventSeries[1],
       exclude: options.exclude || [],
       include: options.include,
+      labelBy: options.labelBy ?? [],
       timezone,
     });
   }),

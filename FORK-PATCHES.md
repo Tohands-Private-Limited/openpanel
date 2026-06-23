@@ -88,6 +88,39 @@ arm + `__syncedAt`, and the queue `isTimestampFromThePast` field). Re-run
 `ids.test.ts`, `track.controller.test.ts`, `events.incoming-events.test.ts`,
 and `track-batch.router.test.ts`.
 
+### Sankey "group nodes by event property" (node label-by rules)
+
+Upstream's flow/Sankey report groups every event by its **name**, collapsing all
+`screen_view` events (the bulk of mobile traffic) into one node and hiding
+screen-to-screen flow. The fork adds a per-event **node label-by** option: an
+event can be grouped by one of its event-level properties (default
+`screen_view → path`) while every other event keeps its name. Upstream has no
+equivalent — a candidate to contribute upstream, but until then re-apply on
+every sync. The feature adds new files and edits files that also exist upstream:
+
+- `packages/validation/src/index.ts` — `isEventLevelProperty` guard,
+  `zSankeyLabelRule` (refine rejects `profile.`/`group.`/`cohort:` dimensions),
+  and `labelBy: zSankeyLabelRule[].default([])` on `zSankeyOptions`.
+- `packages/db/src/services/sankey.service.ts` — `buildSankeyLabelExpr` (the
+  `multiIf` label expression, gated by `isEventLevelProperty` **and**
+  `isKnownEventField` so unknown columns can't reach `getSelectPropertyKey`),
+  the `(name, label)` tuple pipeline across after/before/between modes,
+  `labelBy` on `zGetSankeyInput`, and the `labelBy` param on `getUserFlowCore`.
+- `packages/trpc/src/routers/chart.ts` — threads `labelBy` through the `sankey`
+  procedure.
+- `apps/start/src/components/report/sidebar/SankeyLabelBy.tsx` — **new** UI
+  editor for the rules.
+- `apps/start/src/components/report/sidebar/ReportSettings.tsx` — renders the
+  "Node label" section for Sankey charts.
+- `apps/start/src/components/report/reportSlice.ts` — `changeSankeyLabelBy`
+  reducer + `createDefaultSankeyLabelBy` (seeds `screen_view → path` on new
+  Sankey reports).
+- Tests: `packages/db/src/services/sankey.service.test.ts`
+  (`buildSankeyLabelExpr` unit tests + `getSankey` ClickHouse integration).
+
+Fully back-compatible: saved reports without `labelBy` deserialize to `[]` and
+behave exactly as before; no ClickHouse migration.
+
 ## Temporary patches
 
 ### 1. Deprecated `POST /track/batch` route
