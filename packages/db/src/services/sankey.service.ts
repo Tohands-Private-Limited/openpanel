@@ -8,7 +8,11 @@ import {
 import { z } from 'zod';
 import { TABLE_NAMES, ch } from '../clickhouse/client';
 import { clix } from '../clickhouse/query-builder';
-import { getEventFiltersWhereClause, getSelectPropertyKey } from './chart.service';
+import {
+  getEventFiltersWhereClause,
+  getSelectPropertyKey,
+  isKnownEventField,
+} from './chart.service';
 
 export const zGetSankeyInput = z.object({
   projectId: z.string(),
@@ -45,11 +49,17 @@ export function buildSankeyLabelExpr(
   projectId: string,
 ): string {
   const branches = (labelBy ?? [])
-    // Skip incomplete rules and — defence in depth behind zSankeyLabelRule's
-    // refine — any property that would need a JOIN the flow query lacks.
+    // Skip incomplete rules, properties needing a JOIN the flow query lacks
+    // (isEventLevelProperty), and unknown columns that would reach
+    // getSelectPropertyKey and fail at query time with UNKNOWN_IDENTIFIER
+    // (isKnownEventField, as getChartSql does). This is the only guard on the
+    // getUserFlowCore path, which bypasses the zSankeyOptions refine.
     .filter(
       (rule) =>
-        rule.event && rule.property && isEventLevelProperty(rule.property),
+        rule.event &&
+        rule.property &&
+        isEventLevelProperty(rule.property) &&
+        isKnownEventField(rule.property),
     )
     .map((rule) => {
       const valueExpr = getSelectPropertyKey(rule.property, projectId);

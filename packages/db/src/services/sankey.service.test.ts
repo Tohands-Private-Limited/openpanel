@@ -93,6 +93,19 @@ describe('buildSankeyLabelExpr', () => {
       ).toBe('name');
     }
   });
+
+  it('skips unknown event columns (typos / stale fields) that would fail at query time', () => {
+    // `temple_name` passes isEventLevelProperty (no join prefix) but is not a
+    // real events column. Without the isKnownEventField guard it would emit
+    // `toString(temple_name)` → UNKNOWN_IDENTIFIER. getUserFlowCore bypasses the
+    // zSankeyOptions refine, so this builder is the real guard.
+    expect(
+      buildSankeyLabelExpr(
+        [{ event: 'screen_view', property: 'temple_name' }],
+        PROJECT_ID,
+      ),
+    ).toBe('name');
+  });
 });
 
 describe('zSankeyOptions labelBy back-compat', () => {

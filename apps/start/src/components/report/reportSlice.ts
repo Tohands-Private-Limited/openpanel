@@ -59,6 +59,14 @@ const initialState: InitialState = {
   visibleSeries: undefined,
 };
 
+// Default node-label rule seeded onto freshly created Sankey reports: relabel
+// `screen_view` by its `path` so the flow renders per-screen nodes out of the
+// box instead of one collapsed node. A factory (not a shared constant) so each
+// call returns a fresh array Immer can freeze without freezing a reused ref.
+const createDefaultSankeyLabelBy = (): ISankeyLabelRule[] => [
+  { event: 'screen_view', property: 'path' },
+];
+
 export const reportSlice = createSlice({
   name: 'report',
   initialState,
@@ -210,16 +218,15 @@ export const reportSlice = createSlice({
       state.dirty = true;
       state.chartType = action.payload;
 
-      // Initialize sankey options if switching to sankey. Seed a screen_view →
-      // path label rule so the flow renders per-screen nodes out of the box
-      // (the common mobile-analytics case) instead of one collapsed node.
+      // Initialize sankey options if switching to sankey, seeding the default
+      // screen_view → path label rule (see createDefaultSankeyLabelBy).
       if (action.payload === 'sankey' && !state.options) {
         state.options = {
           type: 'sankey',
           mode: 'after',
           steps: 5,
           exclude: [],
-          labelBy: [{ event: 'screen_view', property: 'path' }],
+          labelBy: createDefaultSankeyLabelBy(),
         };
       }
 
@@ -345,7 +352,7 @@ export const reportSlice = createSlice({
           mode: action.payload,
           steps: 5,
           exclude: [],
-          labelBy: [],
+          labelBy: createDefaultSankeyLabelBy(),
         };
       } else if (state.options.type === 'sankey') {
         state.options.mode = action.payload;
@@ -359,7 +366,7 @@ export const reportSlice = createSlice({
           mode: 'after',
           steps: action.payload,
           exclude: [],
-          labelBy: [],
+          labelBy: createDefaultSankeyLabelBy(),
         };
       } else if (state.options.type === 'sankey') {
         state.options.steps = action.payload;
@@ -373,7 +380,7 @@ export const reportSlice = createSlice({
           mode: 'after',
           steps: 5,
           exclude: action.payload,
-          labelBy: [],
+          labelBy: createDefaultSankeyLabelBy(),
         };
       } else if (state.options.type === 'sankey') {
         state.options.exclude = action.payload;
@@ -388,7 +395,7 @@ export const reportSlice = createSlice({
           steps: 5,
           exclude: [],
           include: action.payload,
-          labelBy: [],
+          labelBy: createDefaultSankeyLabelBy(),
         };
       } else if (state.options.type === 'sankey') {
         state.options.include = action.payload;
