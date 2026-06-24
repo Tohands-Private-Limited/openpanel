@@ -20,6 +20,7 @@ import {
   changeStacked,
   changeUnit,
 } from '../reportSlice';
+import { SankeyLabelBy } from './SankeyLabelBy';
 
 export function ReportSettings() {
   const chartType = useSelector((state) => state.report.chartType);
@@ -61,6 +62,7 @@ export function ReportSettings() {
     if (chartType === 'sankey') {
       fields.push('sankeyMode');
       fields.push('sankeySteps');
+      fields.push('sankeyLabelBy');
       fields.push('sankeyExclude');
       fields.push('sankeyInclude');
     }
@@ -265,6 +267,16 @@ export function ReportSettings() {
               items={eventNames.filter((item) => item.name !== '*')}
               placeholder="Leave empty to include all"
             />
+          </div>
+        )}
+        {fields.includes('sankeyLabelBy') && options?.type === 'sankey' && (
+          <div className="flex flex-col">
+            <Label className="whitespace-nowrap font-medium">Node label</Label>
+            <span className="mb-2 text-muted-foreground text-sm">
+              Group these events by a property instead of their name. Other
+              events use the event name.
+            </span>
+            <SankeyLabelBy value={options.labelBy ?? []} />
           </div>
         )}
         {fields.includes('stacked') && (
