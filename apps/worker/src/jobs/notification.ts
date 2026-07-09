@@ -1,4 +1,4 @@
-import type { Job } from 'bullmq';
+import { type Job, UnrecoverableError } from 'bullmq';
 
 import { Prisma, db } from '@openpanel/db';
 import { sendDiscordNotification } from '@openpanel/integrations/src/discord';
@@ -73,14 +73,31 @@ export async function notificationJob(job: Job<NotificationQueuePayload>) {
             };
           }
 
-          return fetch(integration.config.url, {
+          const res = await fetch(integration.config.url, {
             method: 'POST',
             headers: {
               ...(integration.config.headers ?? {}),
               'Content-Type': 'application/json',
             },
             body: JSON.stringify(body),
+            signal: AbortSignal.timeout(30_000),
           });
+          if (res.ok) {
+            return;
+          }
+          const err = `Webhook ${integration.config.url} returned ${res.status}`;
+          // 4xx (except 408/429) are permanent — the same request will fail
+          // identically on every retry, so mark the job unrecoverable and
+          // stop BullMQ from burning its retry budget.
+          if (
+            res.status >= 400 &&
+            res.status < 500 &&
+            res.status !== 408 &&
+            res.status !== 429
+          ) {
+            throw new UnrecoverableError(err);
+          }
+          throw new Error(err);
         }
         case 'discord': {
           return sendDiscordNotification({
