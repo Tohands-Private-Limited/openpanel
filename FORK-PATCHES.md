@@ -121,6 +121,35 @@ every sync. The feature adds new files and edits files that also exist upstream:
 Fully back-compatible: saved reports without `labelBy` deserialize to `[]` and
 behave exactly as before; no ClickHouse migration.
 
+### Webhook notification retries
+
+Upstream's `notificationQueue` runs webhooks fire-and-forget: no `attempts`, no
+`backoff`, and the worker `return`s the raw `fetch` promise so HTTP 4xx/5xx
+responses are treated as success. The fork retries failed webhooks aggressively:
+
+- `packages/queue/src/queues.ts` — `notificationQueue.defaultJobOptions` sets
+  `attempts: 12`, `backoff: { type: 'exponential', delay: 10000 }`, and
+  `removeOnFail: 100`. Waits between attempts:
+  10s → 20s → 40s → 80s → 160s → 5m → 10m → 21m → 43m → 1.4h → 2.8h.
+  Max wall-clock retry window ≈ 5.7h per job; only 12 outbound HTTP requests
+  to a dead receiver in the whole window.
+- `apps/worker/src/jobs/notification.ts` — the webhook branch now `await`s
+  `fetch` (with a 30s `AbortSignal.timeout` so a hung endpoint can't pin a
+  worker slot) and throws on non-2xx so BullMQ observes HTTP failures.
+  Permanent 4xx responses (excluding 408 / 429) throw `UnrecoverableError`
+  so BullMQ skips the remaining retries — no point re-sending a 400 or 401
+  twelve times. Slack/Discord branches unchanged (their helpers keep their
+  existing behavior; only network errors — not HTTP status — trigger retries
+  for them, which is the same as before).
+
+The queue-level retry config applies to every job type on `notificationQueue`,
+but only the webhook branch was changed to surface HTTP failures as thrown
+errors. Discord's helper (`packages/integrations/src/discord.ts`) still
+swallows errors via `.catch()`, so Discord failures never retry. Slack's
+helper returns the raw fetch, so Slack network failures now retry 500× — an
+acceptable side-effect. Upstream may add its own retry policy later; if so,
+prefer keeping the fork's numbers unless upstream's are stricter.
+
 ## Temporary patches
 
 ### 1. Deprecated `POST /track/batch` route
