@@ -248,6 +248,9 @@ export const notificationQueue = new Queue<NotificationQueuePayload>(
     connection: getRedisQueue(),
     defaultJobOptions: {
       removeOnComplete: 10,
+      removeOnFail: 100,
+      attempts: 12,
+      backoff: { type: 'exponential', delay: 10000 },
     },
   }
 );
