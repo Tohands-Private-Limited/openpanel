@@ -89,10 +89,11 @@ reconstructs them. The two will not converge.
 - **5-day floor** (`ingest.service.ts`): `isOlderThanHistoricalFloor`. `/track`
   and `/event` refuse events older than 5 days (`timestamp-too-old` → 400,
   `event timestamp older than 5 days`).
-- **`src/device-id.ts`**: the `isTimestampFromThePast` param skips the
-  live-session lookup, so a historical event gets the deterministic
-  timestamp-bucketed session id. It is threaded from `buildContext` (`/track`)
-  and the legacy `/event` path (with `eventTimeMs`).
+- **Session id** (`ingest.service.ts`): a historical event resolves its
+  device/session through `NO_LIVE_SESSIONS` instead of the session buffer, so
+  it gets the deterministic timestamp-bucketed session id rather than joining
+  the live session. `src/device-id.ts` itself is unchanged from upstream. Both
+  `buildContext` (`/track`) and the legacy `/event` path do this.
 - **`src/historical-session.ts`** (new): a Redis lock
   (`session_start:<project>:<session>`, TTL = session timeout) so exactly one
   event per bucket emits the `session_start`.
@@ -106,7 +107,7 @@ reconstructs them. The two will not converge.
   - Server events without a session keep their own referrer fields.
 - **`src/ingest.metrics.ts`**: the `sessions_started` kind adds `historical`.
 - Tests: `src/incoming-event-handler.test.ts` ("historical session
-  reconstruction"), `src/device-id.test.ts` ("historical events"), and
+  reconstruction"), `src/historical-session.test.ts`, and
   `ingest.batch.test.ts`.
 
 Known limit, carried over from the old fork: late uploads for the same bucket
