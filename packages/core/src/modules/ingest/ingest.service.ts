@@ -37,7 +37,10 @@ import type {
   IReplayPayload,
   ITrackHandlerPayload,
   ITrackPayload,
+  TrackBatchRejection,
+  TrackBatchResult,
 } from './ingest.constants';
+import { zTrackHandlerPayload } from './ingest.constants';
 import { isBot } from './src/bots/detect';
 import { applyBotSuspicion, stripBotProperties } from './src/bots/suspicion';
 import { isDuplicatedEvent } from './src/deduplicate';
@@ -102,6 +105,14 @@ const FIFTEEN_MINUTES_MS = 15 * ONE_MINUTE_MS;
  * series starts there.
  */
 const EARLIEST_ACCEPTED_TIMESTAMP_MS = Date.UTC(2000, 0, 1);
+/**
+ * FORK: hard floor for back-dated events. Offline-first SDKs upload at most a
+ * few days of history; anything older is refused (400, or a `validation`
+ * rejection inside a batch) rather than reconstructing a stale session.
+ */
+const MAX_HISTORICAL_EVENT_AGE_MS = 5 * 24 * 60 * ONE_MINUTE_MS;
+/** FORK: per-event fan-out inside one batch, so 2000 events don't hit Redis and Kafka at once. */
+const TRACK_BATCH_CONCURRENCY = 50;
 const FALLBACK_USER_AGENT = 'unknown/1.0';
 
 /** The whitelisted subset that ships with the queue payload. */
@@ -189,6 +200,21 @@ export function getTimestamp(
   return { timestamp: clientTimestampNumber, isTimestampFromThePast };
 }
 
+/** FORK: the event carries a `__timestamp` older than the historical floor. */
+export function isOlderThanHistoricalFloor(
+  requestTimestamp: number | undefined,
+  payload: ITrackHandlerPayload['payload']
+): boolean {
+  const { timestamp, isTimestampFromThePast } = getTimestamp(
+    requestTimestamp,
+    payload
+  );
+  return (
+    isTimestampFromThePast &&
+    timestamp < (requestTimestamp || Date.now()) - MAX_HISTORICAL_EVENT_AGE_MS
+  );
+}
+
 export interface TrackContext {
   projectId: string;
   ip: string;
@@ -225,7 +251,22 @@ export type TrackOutcome =
   | { status: 'missing-project-id' }
   | { status: 'replay-missing-session-id' }
   | { status: 'profile-not-found' }
-  | { status: 'profile-property-not-a-number' };
+  | { status: 'profile-property-not-a-number' }
+  | { status: 'timestamp-too-old' };
+
+/** Why a non-`ok` outcome was refused, in the words both transports answer with. */
+export const TRACK_REJECTION_MESSAGES: Record<
+  Exclude<TrackOutcome['status'], 'ok'>,
+  string
+> = {
+  'alias-not-supported': 'Alias is not supported',
+  'invalid-type': 'Invalid type',
+  'missing-project-id': 'Missing projectId',
+  'replay-missing-session-id': 'Session ID is required for replay',
+  'profile-not-found': 'Profile not found',
+  'profile-property-not-a-number': 'Property value is not a number',
+  'timestamp-too-old': 'event timestamp older than 5 days',
+};
 
 async function buildContext(
   deps: IngestScope,
@@ -267,6 +308,7 @@ async function buildContext(
     salts,
     overrideDeviceId,
     eventTimeMs: timestamp.timestamp,
+    isTimestampFromThePast: timestamp.isTimestampFromThePast,
     sessionBuffer: buffers.session,
     sessionTimeoutMs,
     logger: deps.logger,
@@ -467,6 +509,10 @@ export async function ingestTrack(
     return { status: 'missing-project-id' };
   }
 
+  if (isOlderThanHistoricalFloor(request.timestamp, body.payload)) {
+    return { status: 'timestamp-too-old' };
+  }
+
   const context = await buildContext(
     transport.deps,
     request,
@@ -534,6 +580,106 @@ export async function ingestTrack(
     deviceId: context.deviceId,
     sessionId: context.sessionId,
   };
+}
+
+/** What a transport hands the batch pipeline: a `TrackRequest` minus its one body. */
+export type TrackBatchRequest = Omit<TrackRequest, 'body'> & {
+  events: unknown[];
+};
+
+export type TrackBatchOutcome =
+  | ({ status: 'ok' } & TrackBatchResult)
+  | { status: 'missing-project-id' };
+
+function describeValidationError(error: {
+  issues: { path: PropertyKey[]; message: string }[];
+}): string {
+  const issue = error.issues[0];
+  const path = issue?.path.map(String).join('.') ?? '';
+  return path
+    ? `${path}: ${issue?.message}`
+    : (issue?.message ?? 'invalid payload');
+}
+
+/**
+ * FORK: `POST /track` with `{ type: 'batch', payload: [...] }` (and the
+ * deprecated `/track/batch`). Every item runs through `ingestTrack` exactly as
+ * a single-event request would; a bad item is reported by index and never
+ * fails the rest. `internal` rejections are ours, so the client may retry them.
+ */
+export async function ingestTrackBatch(
+  request: TrackBatchRequest,
+  transport: IngestTransport
+): Promise<TrackBatchOutcome> {
+  if (!request.projectId) {
+    return { status: 'missing-project-id' };
+  }
+
+  const { events, ...shared } = request;
+  const maxEventBytes = transport.deps.config.kafka.maxMessageBytes;
+
+  const ingestOne = async (
+    raw: unknown,
+    index: number
+  ): Promise<TrackBatchRejection | null> => {
+    const parsed = zTrackHandlerPayload.safeParse(raw);
+    if (!parsed.success) {
+      return {
+        index,
+        reason: 'validation',
+        error: describeValidationError(parsed.error),
+      };
+    }
+
+    const eventBytes = Buffer.byteLength(JSON.stringify(raw));
+    if (eventBytes > maxEventBytes) {
+      return {
+        index,
+        reason: 'validation',
+        error: `Event is ${eventBytes} bytes; the limit is ${maxEventBytes}.`,
+      };
+    }
+
+    try {
+      const outcome = await ingestTrack(
+        { ...shared, body: parsed.data },
+        transport
+      );
+      if (outcome.status === 'ok') {
+        return null;
+      }
+      return {
+        index,
+        reason: 'validation',
+        error: TRACK_REJECTION_MESSAGES[outcome.status],
+      };
+    } catch (error) {
+      transport.deps.logger.error(
+        { err: error, index, projectId: request.projectId },
+        'Batch event ingestion failed'
+      );
+      return {
+        index,
+        reason: 'internal',
+        error: error instanceof Error ? error.message : 'unknown error',
+      };
+    }
+  };
+
+  const rejected: TrackBatchRejection[] = [];
+  for (let start = 0; start < events.length; start += TRACK_BATCH_CONCURRENCY) {
+    const chunk = events.slice(start, start + TRACK_BATCH_CONCURRENCY);
+    const results = await Promise.all(
+      chunk.map((raw, offset) => ingestOne(raw, start + offset))
+    );
+    for (const rejection of results) {
+      if (rejection) {
+        rejected.push(rejection);
+      }
+    }
+  }
+
+  return { status: 'ok', accepted: events.length - rejected.length, rejected };
 }
 
 /**
@@ -611,7 +757,8 @@ export async function isIngestionWoundDown(
  */
 export type LegacyEventOutcome =
   | { status: 'ok' }
-  | { status: 'missing-project-id' };
+  | { status: 'missing-project-id' }
+  | { status: 'timestamp-too-old' };
 
 export async function ingestLegacyEvent(
   request: {
@@ -641,9 +788,13 @@ export async function ingestLegacyEvent(
 
   // `/event` has no body schema, so `getTimestamp` reads `properties` off
   // whatever arrived.
+  const legacyPayload = request.body as ITrackHandlerPayload['payload'];
+  if (isOlderThanHistoricalFloor(request.timestamp, legacyPayload)) {
+    return { status: 'timestamp-too-old' };
+  }
   const { timestamp, isTimestampFromThePast } = getTimestamp(
     request.timestamp,
-    request.body as ITrackHandlerPayload['payload']
+    legacyPayload
   );
   const ip = request.clientIp;
   const ua = headerValue(request.headers, 'user-agent') ?? FALLBACK_USER_AGENT;
@@ -659,6 +810,8 @@ export async function ingestLegacyEvent(
     ip,
     ua,
     salts,
+    eventTimeMs: timestamp,
+    isTimestampFromThePast,
     sessionBuffer: transport.buffers.session,
     sessionTimeoutMs: resolveSessionTimeoutMs(transport.deps.config),
     logger: transport.deps.logger,
@@ -802,8 +955,13 @@ export async function isDuplicateIngestRequest(request: {
   const ip = request.clientIp;
   const origin = headerValue(request.headers, 'origin');
   const clientId = headerValue(request.headers, 'openpanel-client-id');
-  const isReplay = isTrackBody(request) && request.body.type === 'replay';
-  const shouldCheck = ip && origin && clientId && !isReplay;
+  // FORK: offline-first SDKs retry whole batches, which the body-hash dedup
+  // must not drop.
+  const isExempt =
+    isTrackBody(request) &&
+    (request.body.type === 'replay' ||
+      (request.body.type as string) === 'batch');
+  const shouldCheck = ip && origin && clientId && !isExempt;
 
   if (!shouldCheck) {
     return false;

@@ -343,6 +343,61 @@ export const zTrackHandlerPayload = z.discriminatedUnion('type', [
     .meta({ title: 'Assign Group' }),
 ]) satisfies z.ZodType<ITrackHandlerPayload>;
 
+// FORK (ToHands): batch ingestion for offline-first SDKs. The envelope only
+// checks the array; each item is validated on its own so one bad row is
+// reported in `rejected[]` instead of failing the batch. The 202 response
+// shape `{ accepted, rejected: [{ index, reason, error }] }` is a client
+// contract (Flutter / LVGL SDKs) — see FORK-PATCHES.md.
+export const TRACK_BATCH_MAX_EVENTS = 2000;
+/** Uncompressed request body cap for a batch envelope. */
+export const TRACK_BATCH_MAX_BODY_BYTES = 10 * 1024 * 1024;
+
+const zTrackBatchEvents = z
+  .array(z.unknown())
+  .min(1)
+  .max(TRACK_BATCH_MAX_EVENTS);
+
+export const zTrackBatchHandlerPayload = z
+  .object({
+    type: z.literal('batch'),
+    payload: zTrackBatchEvents,
+  })
+  .meta({ title: 'Batch' });
+
+export type ITrackBatchHandlerPayload = z.infer<
+  typeof zTrackBatchHandlerPayload
+>;
+
+/** What `POST /track` accepts: one event, or a batch envelope of them. */
+export const zTrackRequestBody = z.discriminatedUnion('type', [
+  ...zTrackHandlerPayload.options,
+  zTrackBatchHandlerPayload,
+]);
+
+export type ITrackRequestBody =
+  | ITrackHandlerPayload
+  | ITrackBatchHandlerPayload;
+
+/** Deprecated `POST /track/batch` body. Remove together with that route. */
+export const zTrackBatchBody = z.object({
+  events: zTrackBatchEvents,
+});
+
+export type ITrackBatchBody = z.infer<typeof zTrackBatchBody>;
+
+export type TrackBatchRejectionReason = 'validation' | 'internal';
+
+export interface TrackBatchRejection {
+  index: number;
+  reason: TrackBatchRejectionReason;
+  error: string;
+}
+
+export interface TrackBatchResult {
+  accepted: number;
+  rejected: TrackBatchRejection[];
+}
+
 // Deprecated types for beta version of the SDKs
 
 export interface DeprecatedOpenpanelEventOptions {

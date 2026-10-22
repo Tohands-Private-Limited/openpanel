@@ -14,14 +14,22 @@ import type { AppDeps, HttpCtx } from '../../context';
 import { defineRoutes } from '../../http/define';
 import { toIngestHeaders } from '../../shared/headers';
 import type { DeprecatedPostEventPayload } from './ingest.constants';
-import { zTrackHandlerPayload } from './ingest.constants';
+import {
+  TRACK_BATCH_MAX_BODY_BYTES,
+  TRACK_BATCH_MAX_EVENTS,
+  zTrackBatchBody,
+  zTrackRequestBody,
+} from './ingest.constants';
 import {
   checkIngestBot,
   fetchDeviceIdentity,
   ingestLegacyEvent,
   ingestTrack,
+  ingestTrackBatch,
   isDuplicateIngestRequest,
   isIngestionWoundDown,
+  TRACK_REJECTION_MESSAGES,
+  type TrackBatchOutcome,
   type TrackOutcome,
 } from './ingest.service';
 import { validateIngestRequest } from './src/client-auth';
@@ -48,16 +56,22 @@ const PAYLOAD_TOO_LARGE = 413;
  * a deployment that raises `max.message.bytes` raises this with it.
  */
 function refuseOversizedBody({
+  body,
   ctx,
   request,
   status,
 }: {
+  body?: unknown;
   ctx: { config: { kafka: { maxMessageBytes: number } } };
   request: Request;
   status: StatusFn;
 }) {
   const declared = Number(request.headers.get('content-length'));
-  const limit = ctx.config.kafka.maxMessageBytes;
+  // FORK: a batch becomes one Kafka message per event, so the envelope gets
+  // its own cap and each item is held to the broker limit in the service.
+  const limit = isBatchEnvelope(body)
+    ? Math.max(TRACK_BATCH_MAX_BODY_BYTES, ctx.config.kafka.maxMessageBytes)
+    : ctx.config.kafka.maxMessageBytes;
   if (!Number.isFinite(declared) || declared <= limit) {
     return;
   }
@@ -67,6 +81,27 @@ function refuseOversizedBody({
     message: `Body is ${declared} bytes; the limit is ${limit}.`,
   });
 }
+
+function isBatchEnvelope(body: unknown): boolean {
+  return (
+    typeof body === 'object' &&
+    body !== null &&
+    (body as { type?: unknown }).type === 'batch'
+  );
+}
+
+/** FORK: the batch response is a client contract (Flutter / LVGL SDKs). */
+function respondToBatchOutcome(outcome: TrackBatchOutcome, status: StatusFn) {
+  if (outcome.status === 'missing-project-id') {
+    return status(400, { status: 400, message: 'Missing projectId' });
+  }
+  return status(ACCEPTED_STATUS, {
+    accepted: outcome.accepted,
+    rejected: outcome.rejected,
+  });
+}
+
+const BATCH_DESCRIPTION = `Batches accept up to ${TRACK_BATCH_MAX_EVENTS} events and ${TRACK_BATCH_MAX_BODY_BYTES / (1024 * 1024)}MB uncompressed per request. Each event runs through the same pipeline as a single-event request; per-event failures are returned in rejected[] (202) instead of failing the batch.`;
 
 // There is no thrown-HttpError handler here, so the outcome-to-response
 // mapping is explicit.
@@ -99,6 +134,12 @@ function respondToOutcome(outcome: TrackOutcome, status: StatusFn) {
       return status(400, {
         status: 400,
         message: 'Property value is not a number',
+      });
+    case 'timestamp-too-old':
+      return status(400, {
+        status: 400,
+        error: 'Bad Request',
+        message: TRACK_REJECTION_MESSAGES['timestamp-too-old'],
       });
     default: {
       // `outcome` narrows to `never`: an eighth TrackOutcome variant fails the
@@ -182,14 +223,64 @@ export const ingestRoutes = defineRoutes((app, deps: AppDeps) => {
         .post(
           '/track',
           async ({ body, client, ctx, status, timestamp }) => {
-            const outcome = await ingestTrack(
+            const request = {
+              projectId: client.projectId,
+              clientIp: ctx.ip,
+              headers: toIngestHeaders(ctx.headers),
+              clientSecretAuth: client.secretVerified,
+              timestamp,
+            };
+            const transport = {
+              buffers: ctx.buffers,
+              produceIncomingEvent: (payload, partitionKey) =>
+                produceIncomingEvent(ctx.config, payload, partitionKey),
+              deps: ctx,
+            } satisfies Parameters<typeof ingestTrack>[1];
+
+            if (body.type === 'batch') {
+              const batch = await ingestTrackBatch(
+                { ...request, events: body.payload },
+                transport
+              );
+              return respondToBatchOutcome(batch, status);
+            }
+
+            const outcome = await ingestTrack({ ...request, body }, transport);
+
+            return respondToOutcome(outcome, status);
+          },
+          {
+            clientAuth: { ingest: validateIngestRequest },
+            body: zTrackRequestBody,
+            beforeHandle: [refuseOversizedBody, botGuard, blockWhenWoundDown],
+            detail: {
+              tags: TAGS,
+              description: `Ingest a tracking event (track, identify, group, increment, decrement, replay) or a batch of them ({ "type": "batch", "payload": [event, ...] }). ${BATCH_DESCRIPTION}`,
+            },
+          }
+        )
+        // FORK: deprecated alias for clients shipped before the /track batch
+        // envelope existed. Remove once production logs show no more calls.
+        .post(
+          '/track/batch',
+          async ({ body, client, ctx, status, timestamp }) => {
+            ctx.logger.warn(
+              {
+                deprecatedEndpoint: 'POST /track/batch',
+                projectId: client.projectId,
+                clientId: client.id,
+                eventCount: body.events.length,
+              },
+              'deprecated /track/batch used — migrate to POST /track with { type: "batch", payload: [...] }'
+            );
+            const batch = await ingestTrackBatch(
               {
                 projectId: client.projectId,
                 clientIp: ctx.ip,
                 headers: toIngestHeaders(ctx.headers),
                 clientSecretAuth: client.secretVerified,
                 timestamp,
-                body,
+                events: body.events,
               },
               {
                 buffers: ctx.buffers,
@@ -198,17 +289,26 @@ export const ingestRoutes = defineRoutes((app, deps: AppDeps) => {
                 deps: ctx,
               }
             );
-
-            return respondToOutcome(outcome, status);
+            return respondToBatchOutcome(batch, status);
           },
           {
             clientAuth: { ingest: validateIngestRequest },
-            body: zTrackHandlerPayload,
-            beforeHandle: [refuseOversizedBody, botGuard, blockWhenWoundDown],
+            body: zTrackBatchBody,
+            beforeHandle: [
+              ({ ctx, request, status }) =>
+                refuseOversizedBody({
+                  body: { type: 'batch' },
+                  ctx,
+                  request,
+                  status,
+                }),
+              botGuard,
+              blockWhenWoundDown,
+            ],
             detail: {
               tags: TAGS,
-              description:
-                'Ingest a tracking event (track, identify, group, increment, decrement, replay).',
+              deprecated: true,
+              description: `Deprecated — use POST /track with { "type": "batch", "payload": [event, ...] }. ${BATCH_DESCRIPTION}`,
             },
           }
         )
@@ -273,6 +373,9 @@ export const ingestRoutes = defineRoutes((app, deps: AppDeps) => {
 
             if (outcome.status === 'missing-project-id') {
               return status(400, 'missing origin');
+            }
+            if (outcome.status === 'timestamp-too-old') {
+              return status(400, TRACK_REJECTION_MESSAGES['timestamp-too-old']);
             }
 
             return status(ACCEPTED_STATUS, 'ok');
