@@ -13,7 +13,8 @@ import {
 } from './provider-error';
 
 describe('isRetryableStatus', () => {
-  it('treats 429 and 5xx as retryable', () => {
+  it('treats 408, 429 and 5xx as retryable', () => {
+    expect(isRetryableStatus(408)).toBe(true);
     expect(isRetryableStatus(429)).toBe(true);
     expect(isRetryableStatus(500)).toBe(true);
     expect(isRetryableStatus(503)).toBe(true);

@@ -36,6 +36,10 @@ const HOUR_IN_SECONDS = 3600;
 const DAY_IN_SECONDS = 86_400;
 const COHORT_BACKOFF_MS = 5000;
 const COHORT_ATTEMPTS = 3;
+// Webhook receivers go down for hours, not seconds: 12 attempts at 10s doubling
+// spread the retries over ~5.7h while sending only 12 requests in total.
+const NOTIFICATION_ATTEMPTS = 12;
+const NOTIFICATION_BACKOFF_MS = 10_000;
 
 // `<KEY>_CONCURRENCY` overrides one of these at boot.
 const CONCURRENCY = {
@@ -91,6 +95,8 @@ const cron = defineQueue('cron', {
 
 const notification = defineQueue('notification', {
   defaults: {
+    attempts: NOTIFICATION_ATTEMPTS,
+    backoff: { type: 'exponential', delay: NOTIFICATION_BACKOFF_MS },
     removeOnComplete: 10,
     removeOnFail: { age: DAY_IN_SECONDS, count: 100 },
   },

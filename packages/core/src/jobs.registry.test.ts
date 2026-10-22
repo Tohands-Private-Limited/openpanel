@@ -36,6 +36,8 @@ const PINNED_DEFAULTS = {
   },
   cron: { removeOnComplete: 10, removeOnFail: { age: 86_400, count: 100 } },
   notification: {
+    attempts: 12,
+    backoff: { type: 'exponential', delay: 10_000 },
     removeOnComplete: 10,
     removeOnFail: { age: 86_400, count: 100 },
   },

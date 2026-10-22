@@ -5,15 +5,22 @@
 /** Too Many Requests. */
 export const RATE_LIMITED_STATUS = 429;
 
+/** Request Timeout: the destination gave up waiting, not a refusal of the request. */
+const REQUEST_TIMEOUT_STATUS = 408;
+
 /** The first status in the "provider is broken, not the request" range. */
 const SERVER_ERROR_STATUS_FLOOR = 500;
 
 /**
- * 429 and 5xx are worth another attempt; every other 4xx is the provider
+ * 408, 429 and 5xx are worth another attempt; every other 4xx is the provider
  * refusing THIS request and will refuse it identically next time.
  */
 export function isRetryableStatus(status: number): boolean {
-  return status === RATE_LIMITED_STATUS || status >= SERVER_ERROR_STATUS_FLOOR;
+  return (
+    status === REQUEST_TIMEOUT_STATUS ||
+    status === RATE_LIMITED_STATUS ||
+    status >= SERVER_ERROR_STATUS_FLOOR
+  );
 }
 
 export interface ProviderErrorOptions {
