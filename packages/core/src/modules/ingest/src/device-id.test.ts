@@ -188,32 +188,3 @@ describe('getDeviceId — session resolution', () => {
     expect(result.sessionId).not.toBe('');
   });
 });
-
-// FORK (ToHands): offline uploads must not join the device's live session.
-describe('getDeviceId — historical events', () => {
-  it('never reuses the live session for an event older than the cutoff', async () => {
-    const { getExistingSessions, buffer } = stubBuffer(
-      fakeSession('live-session', NOW - MINUTE)
-    );
-    // Inside one 30-min bucket, clear of its start-of-bucket grace.
-    const pastEventMs = NOW - 2 * 60 * MINUTE + 2 * MINUTE;
-
-    const historical = await getDeviceId({
-      ...BASE,
-      eventTimeMs: pastEventMs,
-      isTimestampFromThePast: true,
-      sessionBuffer: buffer,
-    });
-    const sameBucket = await getDeviceId({
-      ...BASE,
-      eventTimeMs: pastEventMs + 5 * MINUTE,
-      isTimestampFromThePast: true,
-      sessionBuffer: buffer,
-    });
-
-    expect(getExistingSessions).not.toHaveBeenCalled();
-    expect(historical.sessionId).not.toBe('live-session');
-    expect(historical.sessionId).toBeTruthy();
-    expect(sameBucket.sessionId).toBe(historical.sessionId);
-  });
-});

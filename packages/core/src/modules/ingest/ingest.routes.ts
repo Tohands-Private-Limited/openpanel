@@ -30,6 +30,7 @@ import {
   isIngestionWoundDown,
   TRACK_REJECTION_MESSAGES,
   type TrackBatchOutcome,
+  type TrackBatchRequest,
   type TrackOutcome,
 } from './ingest.service';
 import { validateIngestRequest } from './src/client-auth';
@@ -56,22 +57,18 @@ const PAYLOAD_TOO_LARGE = 413;
  * a deployment that raises `max.message.bytes` raises this with it.
  */
 function refuseOversizedBody({
-  body,
   ctx,
   request,
   status,
+  limit = ctx.config.kafka.maxMessageBytes,
 }: {
-  body?: unknown;
   ctx: { config: { kafka: { maxMessageBytes: number } } };
   request: Request;
   status: StatusFn;
+  /** FORK: batch envelopes pass `batchBodyLimit`. */
+  limit?: number;
 }) {
   const declared = Number(request.headers.get('content-length'));
-  // FORK: a batch becomes one Kafka message per event, so the envelope gets
-  // its own cap and each item is held to the broker limit in the service.
-  const limit = isBatchEnvelope(body)
-    ? Math.max(TRACK_BATCH_MAX_BODY_BYTES, ctx.config.kafka.maxMessageBytes)
-    : ctx.config.kafka.maxMessageBytes;
   if (!Number.isFinite(declared) || declared <= limit) {
     return;
   }
@@ -82,12 +79,40 @@ function refuseOversizedBody({
   });
 }
 
-function isBatchEnvelope(body: unknown): boolean {
-  return (
-    typeof body === 'object' &&
-    body !== null &&
-    (body as { type?: unknown }).type === 'batch'
-  );
+/**
+ * FORK: a batch becomes one Kafka message per event, so the envelope gets its
+ * own cap and each item is held to the broker limit in the service.
+ */
+function batchBodyLimit(ctx: {
+  config: { kafka: { maxMessageBytes: number } };
+}): number {
+  return Math.max(TRACK_BATCH_MAX_BODY_BYTES, ctx.config.kafka.maxMessageBytes);
+}
+
+/** FORK: what `/track` and the deprecated `/track/batch` both hand the service. */
+function trackCall(
+  ctx: HttpCtx,
+  client: { projectId: string | null; secretVerified: boolean },
+  timestamp: number | undefined
+): {
+  request: Omit<TrackBatchRequest, 'events'>;
+  transport: Parameters<typeof ingestTrack>[1];
+} {
+  return {
+    request: {
+      projectId: client.projectId,
+      clientIp: ctx.ip,
+      headers: toIngestHeaders(ctx.headers),
+      clientSecretAuth: client.secretVerified,
+      timestamp,
+    },
+    transport: {
+      buffers: ctx.buffers,
+      produceIncomingEvent: (payload, partitionKey) =>
+        produceIncomingEvent(ctx.config, payload, partitionKey),
+      deps: ctx,
+    },
+  };
 }
 
 /** FORK: the batch response is a client contract (Flutter / LVGL SDKs). */
@@ -223,19 +248,7 @@ export const ingestRoutes = defineRoutes((app, deps: AppDeps) => {
         .post(
           '/track',
           async ({ body, client, ctx, status, timestamp }) => {
-            const request = {
-              projectId: client.projectId,
-              clientIp: ctx.ip,
-              headers: toIngestHeaders(ctx.headers),
-              clientSecretAuth: client.secretVerified,
-              timestamp,
-            };
-            const transport = {
-              buffers: ctx.buffers,
-              produceIncomingEvent: (payload, partitionKey) =>
-                produceIncomingEvent(ctx.config, payload, partitionKey),
-              deps: ctx,
-            } satisfies Parameters<typeof ingestTrack>[1];
+            const { request, transport } = trackCall(ctx, client, timestamp);
 
             if (body.type === 'batch') {
               const batch = await ingestTrackBatch(
@@ -252,7 +265,18 @@ export const ingestRoutes = defineRoutes((app, deps: AppDeps) => {
           {
             clientAuth: { ingest: validateIngestRequest },
             body: zTrackRequestBody,
-            beforeHandle: [refuseOversizedBody, botGuard, blockWhenWoundDown],
+            beforeHandle: [
+              ({ body, ctx, request, status }) =>
+                refuseOversizedBody({
+                  ctx,
+                  request,
+                  status,
+                  limit:
+                    body.type === 'batch' ? batchBodyLimit(ctx) : undefined,
+                }),
+              botGuard,
+              blockWhenWoundDown,
+            ],
             detail: {
               tags: TAGS,
               description: `Ingest a tracking event (track, identify, group, increment, decrement, replay) or a batch of them ({ "type": "batch", "payload": [event, ...] }). ${BATCH_DESCRIPTION}`,
@@ -273,21 +297,10 @@ export const ingestRoutes = defineRoutes((app, deps: AppDeps) => {
               },
               'deprecated /track/batch used — migrate to POST /track with { type: "batch", payload: [...] }'
             );
+            const { request, transport } = trackCall(ctx, client, timestamp);
             const batch = await ingestTrackBatch(
-              {
-                projectId: client.projectId,
-                clientIp: ctx.ip,
-                headers: toIngestHeaders(ctx.headers),
-                clientSecretAuth: client.secretVerified,
-                timestamp,
-                events: body.events,
-              },
-              {
-                buffers: ctx.buffers,
-                produceIncomingEvent: (payload, partitionKey) =>
-                  produceIncomingEvent(ctx.config, payload, partitionKey),
-                deps: ctx,
-              }
+              { ...request, events: body.events },
+              transport
             );
             return respondToBatchOutcome(batch, status);
           },
@@ -297,10 +310,10 @@ export const ingestRoutes = defineRoutes((app, deps: AppDeps) => {
             beforeHandle: [
               ({ ctx, request, status }) =>
                 refuseOversizedBody({
-                  body: { type: 'batch' },
                   ctx,
                   request,
                   status,
+                  limit: batchBodyLimit(ctx),
                 }),
               botGuard,
               blockWhenWoundDown,

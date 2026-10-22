@@ -24,9 +24,9 @@ export interface WebhookResult {
   ok: boolean;
   status: number;
   /**
-   * Classified once here: 408, 429 and 5xx are worth another delivery attempt, any
-   * other 4xx is the destination refusing this exact request. A failure with no
-   * response (DNS, connect, TLS, timeout) is retryable.
+   * Classified once here: 408, 429 and 5xx are worth another delivery
+   * attempt, any other 4xx is the destination refusing this exact request. A
+   * failure with no response (DNS, connect, TLS, timeout) is retryable.
    */
   retryable: boolean;
 }

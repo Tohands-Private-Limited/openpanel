@@ -37,6 +37,7 @@ import type {
   IReplayPayload,
   ITrackHandlerPayload,
   ITrackPayload,
+  ITrackRequestBody,
   TrackBatchRejection,
   TrackBatchResult,
 } from './ingest.constants';
@@ -44,7 +45,7 @@ import { zTrackHandlerPayload } from './ingest.constants';
 import { isBot } from './src/bots/detect';
 import { applyBotSuspicion, stripBotProperties } from './src/bots/suspicion';
 import { isDuplicatedEvent } from './src/deduplicate';
-import { getDeviceId } from './src/device-id';
+import { getDeviceId, type SessionBufferReader } from './src/device-id';
 import type {
   IncomingEventPayload,
   IncomingEventProducer,
@@ -110,7 +111,19 @@ const EARLIEST_ACCEPTED_TIMESTAMP_MS = Date.UTC(2000, 0, 1);
  * few days of history; anything older is refused (400, or a `validation`
  * rejection inside a batch) rather than reconstructing a stale session.
  */
-const MAX_HISTORICAL_EVENT_AGE_MS = 5 * 24 * 60 * ONE_MINUTE_MS;
+const MAX_HISTORICAL_EVENT_AGE_DAYS = 5;
+const MAX_HISTORICAL_EVENT_AGE_MS =
+  MAX_HISTORICAL_EVENT_AGE_DAYS * 24 * 60 * ONE_MINUTE_MS;
+/**
+ * FORK: what a back-dated (offline-uploaded) event sees instead of the session
+ * buffer. `withinIdleWindow` is true for any past timestamp, so a backfill
+ * would otherwise join the device's live session; with no live session it
+ * gets the deterministic bucket id the worker reconstructs its session from.
+ */
+const NO_LIVE_SESSIONS: SessionBufferReader = {
+  getExistingSessions: async (_projectId, deviceIds) =>
+    deviceIds.map(() => null),
+};
 /** FORK: per-event fan-out inside one batch, so 2000 events don't hit Redis and Kafka at once. */
 const TRACK_BATCH_CONCURRENCY = 50;
 const FALLBACK_USER_AGENT = 'unknown/1.0';
@@ -203,12 +216,8 @@ export function getTimestamp(
 /** FORK: the event carries a `__timestamp` older than the historical floor. */
 export function isOlderThanHistoricalFloor(
   requestTimestamp: number | undefined,
-  payload: ITrackHandlerPayload['payload']
+  { timestamp, isTimestampFromThePast }: ReturnType<typeof getTimestamp>
 ): boolean {
-  const { timestamp, isTimestampFromThePast } = getTimestamp(
-    requestTimestamp,
-    payload
-  );
   return (
     isTimestampFromThePast &&
     timestamp < (requestTimestamp || Date.now()) - MAX_HISTORICAL_EVENT_AGE_MS
@@ -265,7 +274,7 @@ export const TRACK_REJECTION_MESSAGES: Record<
   'replay-missing-session-id': 'Session ID is required for replay',
   'profile-not-found': 'Profile not found',
   'profile-property-not-a-number': 'Property value is not a number',
-  'timestamp-too-old': 'event timestamp older than 5 days',
+  'timestamp-too-old': `event timestamp older than ${MAX_HISTORICAL_EVENT_AGE_DAYS} days`,
 };
 
 async function buildContext(
@@ -308,8 +317,9 @@ async function buildContext(
     salts,
     overrideDeviceId,
     eventTimeMs: timestamp.timestamp,
-    isTimestampFromThePast: timestamp.isTimestampFromThePast,
-    sessionBuffer: buffers.session,
+    sessionBuffer: timestamp.isTimestampFromThePast
+      ? NO_LIVE_SESSIONS
+      : buffers.session,
     sessionTimeoutMs,
     logger: deps.logger,
   });
@@ -509,7 +519,12 @@ export async function ingestTrack(
     return { status: 'missing-project-id' };
   }
 
-  if (isOlderThanHistoricalFloor(request.timestamp, body.payload)) {
+  if (
+    isOlderThanHistoricalFloor(
+      request.timestamp,
+      getTimestamp(request.timestamp, body.payload)
+    )
+  ) {
     return { status: 'timestamp-too-old' };
   }
 
@@ -788,14 +803,18 @@ export async function ingestLegacyEvent(
 
   // `/event` has no body schema, so `getTimestamp` reads `properties` off
   // whatever arrived.
-  const legacyPayload = request.body as ITrackHandlerPayload['payload'];
-  if (isOlderThanHistoricalFloor(request.timestamp, legacyPayload)) {
-    return { status: 'timestamp-too-old' };
-  }
   const { timestamp, isTimestampFromThePast } = getTimestamp(
     request.timestamp,
-    legacyPayload
+    request.body as ITrackHandlerPayload['payload']
   );
+  if (
+    isOlderThanHistoricalFloor(request.timestamp, {
+      timestamp,
+      isTimestampFromThePast,
+    })
+  ) {
+    return { status: 'timestamp-too-old' };
+  }
   const ip = request.clientIp;
   const ua = headerValue(request.headers, 'user-agent') ?? FALLBACK_USER_AGENT;
   const headers = getStringHeaders(request.headers);
@@ -811,8 +830,9 @@ export async function ingestLegacyEvent(
     ua,
     salts,
     eventTimeMs: timestamp,
-    isTimestampFromThePast,
-    sessionBuffer: transport.buffers.session,
+    sessionBuffer: isTimestampFromThePast
+      ? NO_LIVE_SESSIONS
+      : transport.buffers.session,
     sessionTimeoutMs: resolveSessionTimeoutMs(transport.deps.config),
     logger: transport.deps.logger,
   });
@@ -959,8 +979,7 @@ export async function isDuplicateIngestRequest(request: {
   // must not drop.
   const isExempt =
     isTrackBody(request) &&
-    (request.body.type === 'replay' ||
-      (request.body.type as string) === 'batch');
+    (request.body.type === 'replay' || request.body.type === 'batch');
   const shouldCheck = ip && origin && clientId && !isExempt;
 
   if (!shouldCheck) {
@@ -978,7 +997,7 @@ export async function isDuplicateIngestRequest(request: {
 function isTrackBody(request: {
   method: string;
   body: unknown;
-}): request is { method: string; body: ITrackHandlerPayload } {
+}): request is { method: string; body: ITrackRequestBody } {
   if (request.method !== 'POST') {
     return false;
   }

@@ -383,13 +383,9 @@ export const zTrackBatchBody = z.object({
   events: zTrackBatchEvents,
 });
 
-export type ITrackBatchBody = z.infer<typeof zTrackBatchBody>;
-
-export type TrackBatchRejectionReason = 'validation' | 'internal';
-
 export interface TrackBatchRejection {
   index: number;
-  reason: TrackBatchRejectionReason;
+  reason: 'validation' | 'internal';
   error: string;
 }
 

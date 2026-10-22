@@ -67,17 +67,17 @@ export interface SankeyPathsInput {
   labelBy?: ISankeyLabelRule[];
 }
 
+const NAME_PATH_SHAPE: SankeyPathShape = {
+  orderedEventColumns: compiledText('name as event_name'),
+  dedupeConsecutive: DEDUPE_CONSECUTIVE,
+  truncateAtRepeat: TRUNCATE_AT_REPEAT,
+  transitionPairs: TRANSITION_PAIRS,
+  anchorName: sql.empty,
+  labelOf: sql.empty,
+};
+
 function pathShape(input: SankeyPathsInput): SankeyPathShape {
-  return (
-    sankeyLabelledPathShape(input.labelBy) ?? {
-      orderedEventColumns: compiledText('name as event_name'),
-      dedupeConsecutive: DEDUPE_CONSECUTIVE,
-      truncateAtRepeat: TRUNCATE_AT_REPEAT,
-      transitionPairs: TRANSITION_PAIRS,
-      anchorName: sql.empty,
-      labelOf: sql.empty,
-    }
-  );
+  return sankeyLabelledPathShape(input.labelBy) ?? NAME_PATH_SHAPE;
 }
 
 function dateRange(input: SankeyPathsInput): SqlFragment {

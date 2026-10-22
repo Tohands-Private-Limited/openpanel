@@ -298,7 +298,10 @@ describe('historical floor', () => {
   const withAge = (ageMs: number) =>
     service.isOlderThanHistoricalFloor(
       ARRIVED_AT,
-      trackEvent('e', { __timestamp: atAge(ageMs) }).payload
+      service.getTimestamp(
+        ARRIVED_AT,
+        trackEvent('e', { __timestamp: atAge(ageMs) }).payload
+      )
     );
 
   it('refuses events older than 5 days', () => {
@@ -313,7 +316,10 @@ describe('historical floor', () => {
 
   it('accepts an event without a client timestamp', () => {
     expect(
-      service.isOlderThanHistoricalFloor(ARRIVED_AT, trackEvent('e').payload)
+      service.isOlderThanHistoricalFloor(
+        ARRIVED_AT,
+        service.getTimestamp(ARRIVED_AT, trackEvent('e').payload)
+      )
     ).toBe(false);
   });
 

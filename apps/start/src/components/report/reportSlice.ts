@@ -75,7 +75,7 @@ function clearStaleBreakdownSteps(state: InitialState) {
 // Default node-label rule seeded onto freshly created Sankey reports: relabel
 // `screen_view` by its `path` so the flow renders per-screen nodes out of the
 // box. A factory so each call returns a fresh array Immer can freeze.
-export const createDefaultSankeyLabelBy = (): ISankeyLabelRule[] => [
+const createDefaultSankeyLabelBy = (): ISankeyLabelRule[] => [
   { event: 'screen_view', property: 'path' },
 ];
 
