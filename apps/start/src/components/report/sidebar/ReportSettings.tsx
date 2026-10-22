@@ -19,6 +19,7 @@ import {
   changeUnit,
 } from '../reportSlice';
 import { SankeyLabelBy } from './SankeyLabelBy';
+import { SidebarSection } from './sidebar-section';
 import { Combobox } from '@/components/ui/combobox';
 import { ComboboxEvents } from '@/components/ui/combobox-events';
 import { InputEnter } from '@/components/ui/input-enter';
@@ -100,9 +101,8 @@ export function ReportSettings() {
   }
 
   return (
-    <div>
-      <h3 className="mb-2 font-medium">Settings</h3>
-      <div className="col gap-4 rounded-lg border bg-card p-4">
+    <SidebarSection title="Settings">
+      <div className="flex flex-col gap-3">
         {fields.includes('previous') && (
           <Label className="mb-0 flex items-center justify-between">
             <span className="whitespace-nowrap">
@@ -133,7 +133,9 @@ export function ReportSettings() {
               ]}
               onChange={(val) => dispatch(changeCriteria(val))}
               placeholder="Select criteria"
+              size="sm"
               value={criteria}
+              variant="input"
             />
           </div>
         )}
@@ -156,7 +158,9 @@ export function ReportSettings() {
                 dispatch(changeUnit(val === 'count' ? undefined : val));
               }}
               placeholder="Unit"
+              size="sm"
               value={unit || 'count'}
+              variant="input"
             />
           </div>
         )}
@@ -176,8 +180,10 @@ export function ReportSettings() {
               ]}
               onChange={(val) => dispatch(changeMetric(val as IChartMetric))}
               placeholder="Aggregation"
-              // Same labels the report table uses for these columns.
+              size="sm"
               value={metric}
+              // Same labels the report table uses for these columns.
+              variant="input"
             />
           </div>
         )}
@@ -204,7 +210,9 @@ export function ReportSettings() {
                 );
               }}
               placeholder="Default: Session"
+              size="sm"
               value={funnelGroup || 'session_id'}
+              variant="input"
             />
           </div>
         )}
@@ -214,6 +222,7 @@ export function ReportSettings() {
               Funnel Window
             </Label>
             <InputEnter
+              className="w-36"
               onChangeValue={(value) => {
                 const parsed = Number.parseFloat(value);
                 if (Number.isNaN(parsed)) {
@@ -223,6 +232,7 @@ export function ReportSettings() {
                 }
               }}
               placeholder="Default: 24h"
+              size="sm"
               type="number"
               value={funnelWindow ? String(funnelWindow) : ''}
             />
@@ -245,7 +255,9 @@ export function ReportSettings() {
                 );
               }}
               placeholder="Default: Fixed"
+              size="sm"
               value={conversionYAxisScale}
+              variant="input"
             />
           </div>
         )}
@@ -274,7 +286,9 @@ export function ReportSettings() {
                 );
               }}
               placeholder="Select mode"
+              size="sm"
               value={options?.mode || 'after'}
+              variant="input"
             />
           </div>
         )}
@@ -282,6 +296,7 @@ export function ReportSettings() {
           <div className="flex items-center justify-between gap-4">
             <Label className="mb-0 whitespace-nowrap font-medium">Steps</Label>
             <InputEnter
+              className="w-36"
               onChangeValue={(value) => {
                 const parsed = Number.parseInt(value, 10);
                 if (Number.isNaN(parsed) || parsed < 2 || parsed > 10) {
@@ -291,6 +306,7 @@ export function ReportSettings() {
                 }
               }}
               placeholder="Default: 5"
+              size="sm"
               type="number"
               value={options?.steps ? String(options.steps) : '5'}
             />
@@ -320,6 +336,7 @@ export function ReportSettings() {
               placeholder="Select events to exclude"
               searchable
               value={options?.exclude || []}
+              variant="input"
             />
           </div>
         )}
@@ -339,6 +356,7 @@ export function ReportSettings() {
               placeholder="Leave empty to include all"
               searchable
               value={options?.include || []}
+              variant="input"
             />
           </div>
         )}
@@ -352,6 +370,6 @@ export function ReportSettings() {
           </Label>
         )}
       </div>
-    </div>
+    </SidebarSection>
   );
 }

@@ -5,8 +5,9 @@ This file lists every change we carry on top of upstream. Keep it current so
 upstream syncs stay painless. Fork code is marked with a `FORK (ToHands)`
 comment where it sits inside upstream files.
 
-Last upstream sync: **v3.9.1** (merged as a history-preserving merge whose tree
-is upstream; each patch below was re-ported as its own commit on top).
+Last upstream sync: **v3.10.3**. v3.9.1 came in as a history-preserving merge
+whose tree is upstream, with each patch below re-ported on top as its own
+commit; v3.10.3 was then merged normally.
 
 ## How to sync upstream
 
@@ -45,11 +46,14 @@ fork:
 - Pushes `ghcr.io/tohands-private-limited/openpanel-api` and
   `openpanel-dashboard`, tagged `dev-latest` / `stg-latest` / `latest` plus
   `-<short sha>`.
-- Upstream's settle, version and self-hosting CLI jobs are removed.
+- Every deploy branch builds amd64 and arm64.
+- Upstream's `settle` (debounce) and `version` (release tagging) jobs are
+  removed.
 
-Upstream's `.github/workflows/self-hosting-release.yml` is deleted. It
-publishes upstream's Docker Hub images and GitHub releases when the
-`self-hosting` tag moves, which never applies to the fork.
+Upstream release pipelines that never apply to the fork are deleted:
+- `.github/workflows/self-hosting-release.yml` publishes upstream's Docker Hub
+  images and GitHub releases when the `self-hosting` tag moves.
+- `.github/workflows/sdks.yml` publishes the `@openpanel/*` SDKs to npm.
 
 The api image runs both roles (`ROLE=api|worker|all`). There is no separate
 worker image anymore.
