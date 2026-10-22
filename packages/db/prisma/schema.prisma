@@ -59,6 +59,8 @@ model ChatMessage {
   role           String
   /// [IPrismaUIMessageParts]
   parts          Json
+  /// [IPrismaChatMessageMetadata]
+  metadata       Json?
   createdAt      DateTime     @default(now())
 
   @@index([conversationId, createdAt])
@@ -68,6 +70,8 @@ model ChatMessage {
 model Organization {
   id              String           @id @default(dbgenerated("gen_random_uuid()"))
   name            String
+  // Nullable until every row is backfilled; the organization plugin needs it.
+  slug            String?          @unique
   projects        Project[]
   members         Member[]
   createdByUserId String?
@@ -101,6 +105,34 @@ model Organization {
   subscriptionPeriodEventsCountExceededAt DateTime?
   subscriptionPeriodEventsLimit           Int       @default(0)
   subscriptionInterval                    String?
+  /// [IPrismaCancellationReason]
+  subscriptionCancelReason                String?
+  subscriptionCancelComment               String?
+  // When the one-time save-offer discount was applied; guards re-offering it.
+  subscriptionSaveDiscountAppliedAt       DateTime?
+  // Pause-at-period-end mirrors Polar: status stays `active` with this flag set
+  // until the period ends, then flips to `paused`.
+  subscriptionPauseAtPeriodEnd            Boolean   @default(false)
+  subscriptionResumesAt                   DateTime?
+  // When the current Polar subscription was first created. Unlike
+  // subscriptionStartsAt (overwritten with each period start on renewal) this
+  // is stable, so it can measure tenure (e.g. the switch-to-yearly prompt).
+  subscriptionFirstStartedAt              DateTime?
+  // Usage-alert dedupe markers — cleared when a new billing cycle resets the
+  // usage counter (or the limit is raised), so each cycle can warn once.
+  usageWarningSentAt                      DateTime?
+  usageExceededSentAt                     DateTime?
+  /// [IPrismaSubscriptionDiscount]
+  subscriptionDiscount                    Json?
+
+  // Wind-down: trial expired -> ingestion blocked -> data deleted.
+  // Anchored on windDownStartedAt (stamped when the org enters the sequence)
+  // rather than subscriptionEndsAt: existing trial_expired orgs have an expiry
+  // hundreds of days in the past, so anchoring there would skip every email and
+  // delete them on the first tick.
+  windDownStartedAt DateTime?
+  /// [IPrismaWindDownStep]
+  windDownStep      String?
 
   // When deleteAt > now(), the organization will be deleted
   deleteAt DateTime?
@@ -108,6 +140,7 @@ model Organization {
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
+  @@index([windDownStartedAt])
   @@map("organizations")
 }
 
@@ -190,22 +223,44 @@ model Session {
 }
 
 model Member {
-  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  id             String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   role           String
   email          String
   // userId is nullable because we want to allow invites to be sent to emails that are not registered
   userId         String?
-  user           User?        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user           User?           @relation(fields: [userId], references: [id], onDelete: Cascade)
   invitedById    String?
-  invitedBy      User?        @relation("invitedBy", fields: [invitedById], references: [id], onDelete: SetNull)
+  invitedBy      User?           @relation("invitedBy", fields: [invitedById], references: [id], onDelete: SetNull)
   organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  // `all` follows projects created later; `selected` with no rows is no access.
+  projectScope   ProjectScope    @default(all)
+  projects       MemberProject[]
   meta           Json?
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @default(now()) @updatedAt
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @default(now()) @updatedAt
 
   @@unique([organizationId, userId])
   @@map("members")
+}
+
+enum ProjectScope {
+  all
+  selected
+}
+
+model MemberProject {
+  memberId  String       @db.Uuid
+  member    Member       @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  projectId String
+  project   Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  // Null derives the level from the role; set only to restrict below it.
+  level     AccessLevel?
+  createdAt DateTime     @default(now())
+
+  @@id([memberId, projectId])
+  @@index([projectId])
+  @@map("member_projects")
 }
 
 model Invite {
@@ -215,7 +270,9 @@ model Invite {
   createdById    String
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  projectAccess  String[]
+  /// [IPrismaInviteProjectAccess]
+  projectAccess  Json         @default("[]")
+  projectScope   ProjectScope @default(all)
   expiresAt      DateTime
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @default(now()) @updatedAt
@@ -237,6 +294,15 @@ model Project {
   allowUnsafeRevenueTracking Boolean       @default(false)
   /// [IPrismaProjectFilters]
   filters                    Json          @default("[]")
+  // Set once when the project's first event arrives (activation checklist,
+  // onboarding). Never updated after that.
+  firstEventAt               DateTime?
+  // Data-health notice markers set by the dataHealth cron. `noDataNotifiedAt`:
+  // told the org this project never received events. `dataStoppedNotifiedAt`:
+  // told them the event flow stalled — compared against the last event time, so
+  // a resume followed by a new stall notifies again without clearing.
+  noDataNotifiedAt           DateTime?
+  dataStoppedNotifiedAt      DateTime?
 
   clients           Client[]
   reports           Report[]
@@ -246,13 +312,17 @@ model Project {
   shareReports      ShareReport[]
   shareWidgets      ShareWidget[]
   meta              EventMeta[]
+  customEvents      CustomEvent[]
   references        Reference[]
   access            ProjectAccess[]
+  memberProjects    MemberProject[]
   notificationRules NotificationRule[]
   notifications     Notification[]
   imports           Import[]
   gscConnection     GscConnection?
   cohorts           Cohort[]
+  exportWatermarks  ExportWatermark[]
+  integrations      Integration[]
 
   // When deleteAt > now(), the project will be deleted
   deleteAt DateTime?
@@ -378,6 +448,9 @@ enum Metric {
   average
   min
   max
+  // Appended last to match what `ALTER TYPE ... ADD VALUE` does in the DB,
+  // so `prisma migrate` reports no drift.
+  count
 }
 
 model Report {
@@ -389,6 +462,7 @@ model Report {
   lineType      String    @default("monotone")
   breakdowns    Json
   events        Json
+  globalFilters Json      @default("[]")
   formula       String?
   unit          String?
   metric        Metric    @default(sum)
@@ -400,6 +474,8 @@ model Report {
   funnelWindow  Float?
   /// [IReportOptions]
   options       Json?
+  /// How a dashboard tile shows the report: { view: 'chart' | 'table' }
+  display       Json?
   visibleSeries String[]
   startDate     String?
   endDate       String?
@@ -420,15 +496,19 @@ model ReportLayout {
   reportId String @unique @db.Uuid
   report   Report @relation(fields: [reportId], references: [id], onDelete: Cascade)
 
-  // Grid position and size
+  // The grid the layout was saved on: 12 (× 100px rows) before code migration
+  // 25, 24 (× 42px rows) after. Writers set it, so a row without it is old.
+  gridColumns Int @default(12)
+
+  // Grid position and size, in 24-column × 42px-row units
   x Int @default(0)
   y Int @default(0)
-  w Int @default(4)
-  h Int @default(3)
+  w Int @default(8)
+  h Int @default(6)
 
   // Optional: store additional layout preferences
-  minW Int? @default(2)
-  minH Int? @default(2)
+  minW Int? @default(4)
+  minH Int? @default(4)
   maxW Int?
   maxH Int?
 
@@ -515,6 +595,21 @@ model EventMeta {
   @@map("event_meta")
 }
 
+model CustomEvent {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String
+  /// [IPrismaCustomEventItems]
+  items     Json
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([projectId, name])
+  @@map("custom_events")
+}
+
 model Reference {
   id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   title       String
@@ -581,12 +676,40 @@ model Integration {
   config            Json
   organization      Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   organizationId    String
+  // When set, the integration is scoped to a single project; null = legacy
+  // org-wide (applies to every project in the org). organizationId is kept
+  // (derived from the project on create) so org-level queries/cascades still work.
+  project           Project?           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId         String?
   notificationRules NotificationRule[]
   notifications     Notification[]
+  exportWatermarks  ExportWatermark[]
   createdAt         DateTime           @default(now())
   updatedAt         DateTime           @default(now()) @updatedAt
 
+  @@index([organizationId])
+  @@index([projectId])
   @@map("integrations")
+}
+
+// Tracks how far the object-store export (S3/GCS) has progressed for a given
+// (project, integration) pair. The cursor is ClickHouse `inserted_at` plus the
+// last event id to break ties within the same millisecond, so windowed reads
+// are exactly-once across runs.
+model ExportWatermark {
+  id             String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  project        Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId      String
+  integration    Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  integrationId  String      @db.Uuid
+  lastInsertedAt DateTime
+  lastEventId    String      @default("")
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @default(now()) @updatedAt
+
+  @@unique([projectId, integrationId])
+  @@index([integrationId])
+  @@map("export_watermarks")
 }
 
 model ResetPassword {
@@ -652,6 +775,16 @@ model ProjectInsight {
   impactScore  Float   @default(0)
   severityBand String? // "low" | "moderate" | "severe"
 
+  // AI enrichment (Tier-1, written by the OpenAI enrichment job after upsert).
+  // Null until enriched; the dashboard sorts active insights by relevanceScore.
+  relevanceScore  Float? // 0..1 — is this worth a human's attention right now
+  aiSummary       String? // plain-language one-liner derived from the payload
+  aiCategory      String? // "spike" | "drop" | "shift" | "anomaly" | "trend"
+  emailWorthy     Boolean   @default(false) // include in weekly digest selection
+  referenceWorthy Boolean   @default(false) // discrete event worth a chart annotation
+  enrichedAt      DateTime?
+  enrichVersion   Int? // bump to force re-enrichment when prompt/schema changes
+
   version  Int    @default(1)
   threadId String @default(dbgenerated("gen_random_uuid()")) @db.Uuid
 
@@ -667,6 +800,7 @@ model ProjectInsight {
   @@unique([projectId, moduleKey, dimensionKey, windowKind, state])
   @@index([projectId, impactScore(sort: Desc)])
   @@index([projectId, moduleKey, windowKind, state])
+  @@index([projectId, state, relevanceScore(sort: Desc)])
   @@map("project_insights")
 }
 

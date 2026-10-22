@@ -1,4 +1,4 @@
-import type { IServiceProjectWithClients } from '@openpanel/db';
+import type { IServiceProjectWithClients } from '@openpanel/core';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { GlobeIcon, KeyIcon, UserIcon } from 'lucide-react';
 import { toast } from 'sonner';
@@ -115,11 +115,7 @@ export function VerifyFaq({
                     For web tracking, the <code>clientId</code> in your snippet
                     must match this project. Copy it here if needed:
                   </span>
-                  <CopyInput
-                    className="[&_.font-mono]:text-sm"
-                    label="Client ID"
-                    value={client.id}
-                  />
+                  <CopyInput className="" label="Client ID" value={client.id} />
                 </AlertDescription>
               </Alert>
               <Alert>
@@ -155,7 +151,7 @@ export function VerifyFaq({
                   </span>
                   {showSecret && (
                     <CopyInput
-                      className="[&_.font-mono]:text-sm"
+                      className=""
                       label="Client secret"
                       value={secret}
                     />

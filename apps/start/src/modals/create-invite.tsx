@@ -1,27 +1,25 @@
+import { zodResolver } from '@hookform/resolvers/zod';
+import { zInviteUser } from '@openpanel/core/modules/organization/organization.constants';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { SendIcon } from 'lucide-react';
+import { Controller, useForm } from 'react-hook-form';
+import { toast } from 'sonner';
+import type { z } from 'zod';
 import { InputWithLabel } from '@/components/forms/input-with-label';
+import { ProjectScopePicker } from '@/components/settings/project-scope-picker';
 import { Button } from '@/components/ui/button';
-import { ComboboxAdvanced } from '@/components/ui/combobox-advanced';
 import { Label } from '@/components/ui/label';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import {
+  closeSheet,
   SheetContent,
   SheetDescription,
   SheetFooter,
   SheetHeader,
   SheetTitle,
-  closeSheet,
 } from '@/components/ui/sheet';
 import { useAppParams } from '@/hooks/use-app-params';
-import { zodResolver } from '@hookform/resolvers/zod';
-import { SendIcon } from 'lucide-react';
-import { Controller, useForm } from 'react-hook-form';
-import { toast } from 'sonner';
-import type { z } from 'zod';
-
 import { useTRPC } from '@/integrations/trpc/react';
-import type { IServiceProject } from '@openpanel/db';
-import { zInviteUser } from '@openpanel/validation';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 type IForm = z.infer<typeof zInviteUser>;
 
@@ -31,20 +29,23 @@ export default function CreateInvite() {
   const projectsQuery = useQuery(
     trpc.project.list.queryOptions({
       organizationId,
-    }),
+    })
   );
   const projects = projectsQuery.data ?? [];
 
   const queryClient = useQueryClient();
 
-  const { register, handleSubmit, formState, reset, control } = useForm<IForm>({
-    resolver: zodResolver(zInviteUser),
-    defaultValues: {
-      organizationId,
-      access: [],
-      role: 'org:member',
-    },
-  });
+  const { register, handleSubmit, formState, reset, control, watch } =
+    useForm<IForm>({
+      resolver: zodResolver(zInviteUser),
+      defaultValues: {
+        organizationId,
+        projectScope: 'all',
+        access: [],
+        role: 'member',
+      },
+    });
+  const projectScope = watch('projectScope');
 
   const mutation = useMutation(
     trpc.organization.inviteUser.mutationOptions({
@@ -52,7 +53,7 @@ export default function CreateInvite() {
         toast.success('User has been invited');
         reset();
         queryClient.invalidateQueries(
-          trpc.organization.invitations.queryFilter({ organizationId }),
+          trpc.organization.invitations.queryFilter({ organizationId })
         );
       },
       onError(error) {
@@ -60,7 +61,7 @@ export default function CreateInvite() {
           description: error.message,
         });
       },
-    }),
+    })
   );
 
   return (
@@ -86,11 +87,11 @@ export default function CreateInvite() {
                 organization.
               </p>
             )}
-            <div className="row gap-4 mt-8">
+            <div className="row mt-8 gap-4">
               <Button onClick={() => mutation.reset()}>
                 Invite another user
               </Button>
-              <Button variant="outline" onClick={() => closeSheet()}>
+              <Button onClick={() => closeSheet()} variant="outline">
                 Close
               </Button>
             </div>
@@ -108,37 +109,37 @@ export default function CreateInvite() {
             </div>
           </SheetHeader>
           <form
+            className="flex flex-1 flex-col gap-8"
             onSubmit={handleSubmit((values) => mutation.mutate(values))}
-            className="flex flex-col gap-8"
           >
             <InputWithLabel
               className="w-full max-w-sm"
-              label="Email"
               error={formState.errors.email?.message}
+              label="Email"
               placeholder="Who do you want to invite?"
               {...register('email')}
             />
             <div>
               <Label>What role?</Label>
               <Controller
-                name="role"
                 control={control}
+                name="role"
                 render={({ field }) => (
                   <RadioGroup
+                    className="flex gap-4"
                     defaultValue={field.value}
+                    onBlur={field.onBlur}
                     onChange={field.onChange}
                     ref={field.ref}
-                    onBlur={field.onBlur}
-                    className="flex gap-4"
                   >
                     <div className="flex items-center gap-2">
-                      <RadioGroupItem value="org:member" id="member" />
+                      <RadioGroupItem id="member" value="member" />
                       <Label className="mb-0" htmlFor="member">
                         Member
                       </Label>
                     </div>
                     <div className="flex items-center gap-2">
-                      <RadioGroupItem value="org:admin" id="admin" />
+                      <RadioGroupItem id="admin" value="admin" />
                       <Label className="mb-0" htmlFor="admin">
                         Admin
                       </Label>
@@ -146,33 +147,38 @@ export default function CreateInvite() {
                   </RadioGroup>
                 )}
               />
+              <p className="mt-1 text-muted-foreground text-sm">
+                Admins manage members and projects. Members can edit the
+                projects they have access to.
+              </p>
             </div>
             <Controller
-              name="access"
               control={control}
+              name="access"
               render={({ field }) => (
                 <div>
-                  <Label>Restrict access</Label>
-                  <ComboboxAdvanced
-                    placeholder="Restrict access to projects"
-                    value={field.value}
-                    onChange={field.onChange}
-                    items={projects.map((item) => ({
-                      label: item.name,
-                      value: item.id,
-                    }))}
+                  <Label>Project access</Label>
+                  <Controller
+                    control={control}
+                    name="projectScope"
+                    render={({ field: scopeField }) => (
+                      <ProjectScopePicker
+                        access={field.value}
+                        onAccessChange={field.onChange}
+                        onScopeChange={scopeField.onChange}
+                        projectScope={projectScope}
+                        projects={projects}
+                      />
+                    )}
                   />
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    Leave empty to give access to all projects
-                  </p>
                 </div>
               )}
             />
             <SheetFooter>
               <Button
                 icon={SendIcon}
-                type="submit"
                 loading={mutation.isPending}
+                type="submit"
               >
                 Invite user
               </Button>

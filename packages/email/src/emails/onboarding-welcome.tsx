@@ -1,55 +1,81 @@
-import { Heading, Link, Text } from '@react-email/components';
-import React from 'react';
+import { Link, Text } from '@react-email/components';
 import { z } from 'zod';
 import { Layout } from '../components/layout';
 import { List } from '../components/list';
+import { withUtm } from '../utm';
 
 export const zOnboardingWelcome = z.object({
   firstName: z.string().optional(),
   dashboardUrl: z.string(),
+  hasData: z.boolean().default(false),
 });
 
 export type Props = z.infer<typeof zOnboardingWelcome>;
 export default OnboardingWelcome;
 export function OnboardingWelcome({
   firstName,
+  dashboardUrl = 'https://dashboard.openpanel.dev',
+  hasData = false,
   unsubscribeUrl,
 }: Props & { unsubscribeUrl?: string }) {
   return (
     <Layout unsubscribeUrl={unsubscribeUrl}>
       <Text>Hi{firstName ? ` ${firstName}` : ''},</Text>
-      <Text>Thanks for trying OpenPanel.</Text>
+      <Text>Carl here. I build OpenPanel. Thanks for signing up.</Text>
       <Text>
-        We built OpenPanel because most analytics tools are either too
-        expensive, too complicated, or both. OpenPanel is different.
+        Your trial runs for 30 days with everything included. No card needed
+        until you decide to stay.
       </Text>
-      <Text>
-        We hope you find OpenPanel useful and if you have any questions,
-        regarding tracking or how to import your existing events, just reach
-        out. We're here to help.
-      </Text>
-      <Text>To get started, you can:</Text>
-      <List
-        items={[
-          <Link
-            key=""
-            href={'https://openpanel.dev/docs/get-started/install-openpanel'}
-          >
-            Install tracking script
-          </Link>,
-          <Link
-            key=""
-            href={'https://openpanel.dev/docs/get-started/track-events'}
-          >
-            Start tracking your events
-          </Link>,
-        ]}
-      />
-      <Text>
-        Best regards,
-        <br />
-        Carl
-      </Text>
+      {hasData ? (
+        <>
+          <Text>
+            Events are already coming in, so you're past the hard part. Have a
+            look around your dashboard and reply if anything looks off.
+          </Text>
+          <Text>
+            <Link href={withUtm(dashboardUrl, 'onboarding-welcome')}>
+              Open your dashboard
+            </Link>
+          </Text>
+        </>
+      ) : (
+        <>
+          <Text>
+            First step is getting data in. The install usually takes a few
+            minutes:
+          </Text>
+          <List
+            items={[
+              <Link
+                href={withUtm(
+                  'https://openpanel.dev/docs/get-started/install-openpanel',
+                  'onboarding-welcome'
+                )}
+                key="install"
+              >
+                Install the tracking script
+              </Link>,
+              <Link
+                href={withUtm(
+                  'https://openpanel.dev/docs/get-started/track-events',
+                  'onboarding-welcome'
+                )}
+                key="track"
+              >
+                Track custom events
+              </Link>,
+            ]}
+          />
+          <Text>If you get stuck, just reply to this email.</Text>
+        </>
+      )}
+      <Text>Carl</Text>
     </Layout>
   );
 }
+
+OnboardingWelcome.PreviewProps = {
+  firstName: 'Alex',
+  dashboardUrl: 'https://dashboard.openpanel.dev/org-id',
+  hasData: false,
+};

@@ -1,22 +1,26 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { toast } from 'sonner';
-
-import { InputWithLabel, WithLabel } from '@/components/forms/input-with-label';
-import { ProjectMapper } from '@/components/project-mapper';
-import { Button } from '@/components/ui/button';
-import { useAppParams } from '@/hooks/use-app-params';
-import { useTRPC } from '@/integrations/trpc/react';
-import { cn } from '@/lib/utils';
 import { zodResolver } from '@hookform/resolvers/zod';
 import type {
+  IAmplitudeImportConfig,
   IImportConfig,
   IMixpanelImportConfig,
   IUmamiImportConfig,
-} from '@openpanel/validation';
+} from '@openpanel/core/modules/import/import.constants';
 import {
+  zAmplitudeImportConfig,
   zMixpanelImportConfig,
   zUmamiImportConfig,
-} from '@openpanel/validation';
+} from '@openpanel/core/modules/import/import.constants';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { format } from 'date-fns';
+import { CalendarIcon } from 'lucide-react';
+import { useFieldArray, useForm } from 'react-hook-form';
+import { toast } from 'sonner';
+import type { z } from 'zod';
+import { popModal, pushModal } from '.';
+import { ModalContent, ModalHeader } from './Modal/Container';
+import { InputWithLabel, WithLabel } from '@/components/forms/input-with-label';
+import { ProjectMapper } from '@/components/project-mapper';
+import { Button } from '@/components/ui/button';
 import {
   Select,
   SelectContent,
@@ -24,14 +28,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { format } from 'date-fns';
-import { CalendarIcon } from 'lucide-react';
-import { useFieldArray, useForm } from 'react-hook-form';
-import type { z } from 'zod';
-import { popModal, pushModal } from '.';
-import { ModalContent, ModalHeader } from './Modal/Container';
+import { useAppParams } from '@/hooks/use-app-params';
+import { useTRPC } from '@/integrations/trpc/react';
+import { cn } from '@/lib/utils';
 
-type Provider = 'umami' | 'plausible' | 'mixpanel';
+type Provider = 'umami' | 'plausible' | 'mixpanel' | 'amplitude';
 
 interface AddImportProps {
   provider: Provider;
@@ -41,6 +42,7 @@ interface AddImportProps {
 
 type UmamiFormData = z.infer<typeof zUmamiImportConfig>;
 type MixpanelFormData = z.infer<typeof zMixpanelImportConfig>;
+type AmplitudeFormData = z.infer<typeof zAmplitudeImportConfig>;
 
 interface UmamiImportProps {
   onSubmit: (config: IUmamiImportConfig) => void;
@@ -57,7 +59,7 @@ function UmamiImport({
   const { data: projects = [] } = useQuery(
     trpc.project.list.queryOptions({
       organizationId,
-    }),
+    })
   );
 
   const form = useForm<UmamiFormData>({
@@ -80,32 +82,32 @@ function UmamiImport({
   });
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
+    <form className="space-y-4" onSubmit={handleSubmit}>
       <div className="space-y-4 py-4">
         <InputWithLabel
-          label="File URL"
-          placeholder="https://example.com/export.csv"
           error={form.formState.errors.fileUrl?.message}
           info="Provide a publicly accessible URL to your exported CSV file."
+          label="File URL"
+          placeholder="https://example.com/export.csv"
           {...form.register('fileUrl')}
         />
 
         <ProjectMapper
-          fields={fields}
           append={append}
-          remove={remove}
+          fields={fields}
           projects={projects}
           register={form.register}
-          watch={form.watch}
+          remove={remove}
           setValue={form.setValue}
+          watch={form.watch}
         />
       </div>
 
       <div className="flex justify-between">
-        <Button type="button" variant="outline" onClick={() => popModal()}>
+        <Button onClick={() => popModal()} type="button" variant="outline">
           Cancel
         </Button>
-        <Button type="submit" disabled={isPending}>
+        <Button disabled={isPending} type="submit">
           {isPending ? 'Starting...' : 'Start Import'}
         </Button>
       </div>
@@ -160,47 +162,47 @@ function MixpanelImport({
   });
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4">
+    <form className="space-y-4" onSubmit={handleSubmit}>
       <div className="space-y-4 py-4">
         <InputWithLabel
+          error={form.formState.errors.serviceAccount?.message}
           label="Service Account"
           placeholder="Eg. xxx.xxx.mp-service-account"
-          error={form.formState.errors.serviceAccount?.message}
           {...form.register('serviceAccount')}
         />
 
         <InputWithLabel
-          label="Service Secret"
-          type="password"
-          placeholder="Your Mixpanel service secret"
           error={form.formState.errors.serviceSecret?.message}
+          label="Service Secret"
+          placeholder="Your Mixpanel service secret"
+          type="password"
           {...form.register('serviceSecret')}
         />
 
         <InputWithLabel
+          error={form.formState.errors.projectId?.message}
           label="Project ID"
           placeholder="Your Mixpanel project ID"
-          error={form.formState.errors.projectId?.message}
           {...form.register('projectId')}
         />
 
         <WithLabel
-          label="Date Range"
           info={
-            !form.getValues('from') || !form.getValues('to')
-              ? 'Select the date range for importing data'
-              : undefined
+            form.getValues('from') && form.getValues('to')
+              ? undefined
+              : 'Select the date range for importing data'
           }
+          label="Date Range"
         >
           <Button
-            type="button"
-            variant="outline"
             className={cn(
               'w-full justify-start text-left font-normal',
-              (!form.getValues('from') || !form.getValues('to')) &&
-                'text-muted-foreground',
+              !(form.getValues('from') && form.getValues('to')) &&
+                'text-muted-foreground'
             )}
             onClick={handleDateRangeSelect}
+            type="button"
+            variant="outline"
           >
             <CalendarIcon className="mr-2 h-4 w-4" />
             {form.getValues('from') && form.getValues('to') ? (
@@ -215,19 +217,22 @@ function MixpanelImport({
         </WithLabel>
 
         <InputWithLabel
+          error={form.formState.errors.mapScreenViewProperty?.message}
+          info="Leave empty if not applicable"
           label="Screen View Property"
           placeholder="Enter the name of the property that contains the screen name"
-          info="Leave empty if not applicable"
-          error={form.formState.errors.mapScreenViewProperty?.message}
           {...form.register('mapScreenViewProperty')}
         />
 
-        <WithLabel label="Data Residency" info="Select the Mixpanel data center your project uses">
+        <WithLabel
+          info="Select the Mixpanel data center your project uses"
+          label="Data Residency"
+        >
           <Select
-            value={form.watch('dataResidency') ?? 'us'}
             onValueChange={(value) =>
               form.setValue('dataResidency', value as 'us' | 'eu' | 'in')
             }
+            value={form.watch('dataResidency') ?? 'us'}
           >
             <SelectTrigger className="w-full">
               <SelectValue placeholder="US (default)" />
@@ -242,10 +247,140 @@ function MixpanelImport({
       </div>
 
       <div className="flex justify-between">
-        <Button type="button" variant="outline" onClick={() => popModal()}>
+        <Button onClick={() => popModal()} type="button" variant="outline">
           Cancel
         </Button>
-        <Button type="submit" disabled={isPending}>
+        <Button disabled={isPending} type="submit">
+          {isPending ? 'Starting...' : 'Start Import'}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+interface AmplitudeImportProps {
+  onSubmit: (config: IAmplitudeImportConfig) => void;
+  isPending: boolean;
+  organizationId: string;
+}
+
+function AmplitudeImport({ onSubmit, isPending }: AmplitudeImportProps) {
+  const form = useForm<AmplitudeFormData>({
+    resolver: zodResolver(zAmplitudeImportConfig),
+    defaultValues: {
+      provider: 'amplitude',
+      type: 'api',
+      apiKey: '',
+      secretKey: '',
+      from: '',
+      to: '',
+    },
+  });
+
+  const handleDateRangeSelect = () => {
+    pushModal('DateRangerPicker', {
+      startDate: form.getValues('from')
+        ? new Date(form.getValues('from'))
+        : undefined,
+      endDate: form.getValues('to')
+        ? new Date(form.getValues('to'))
+        : undefined,
+      onChange: ({ startDate, endDate }) => {
+        form.setValue('from', format(startDate, 'yyyy-MM-dd'));
+        form.setValue('to', format(endDate, 'yyyy-MM-dd'));
+        form.trigger('from');
+        form.trigger('to');
+      },
+    });
+  };
+
+  const handleSubmit = form.handleSubmit((data) => {
+    onSubmit(data);
+  });
+
+  return (
+    <form className="space-y-4" onSubmit={handleSubmit}>
+      <div className="space-y-4 py-4">
+        <InputWithLabel
+          error={form.formState.errors.apiKey?.message}
+          info="Settings → Projects → General in Amplitude."
+          label="API Key"
+          placeholder="Your Amplitude API key"
+          {...form.register('apiKey')}
+        />
+
+        <InputWithLabel
+          error={form.formState.errors.secretKey?.message}
+          label="Secret Key"
+          placeholder="Your Amplitude secret key"
+          type="password"
+          {...form.register('secretKey')}
+        />
+
+        <WithLabel
+          info={
+            form.getValues('from') && form.getValues('to')
+              ? undefined
+              : 'Select the date range for importing data'
+          }
+          label="Date Range"
+        >
+          <Button
+            className={cn(
+              'w-full justify-start text-left font-normal',
+              !(form.getValues('from') && form.getValues('to')) &&
+                'text-muted-foreground'
+            )}
+            onClick={handleDateRangeSelect}
+            type="button"
+            variant="outline"
+          >
+            <CalendarIcon className="mr-2 h-4 w-4" />
+            {form.getValues('from') && form.getValues('to') ? (
+              <>
+                {format(new Date(form.getValues('from')), 'LLL dd, y')} -{' '}
+                {format(new Date(form.getValues('to')), 'LLL dd, y')}
+              </>
+            ) : (
+              <span>Pick a date range</span>
+            )}
+          </Button>
+        </WithLabel>
+
+        <InputWithLabel
+          error={form.formState.errors.mapScreenViewProperty?.message}
+          info="Leave empty if not applicable"
+          label="Screen View Property"
+          placeholder="Enter the name of the property that contains the screen name"
+          {...form.register('mapScreenViewProperty')}
+        />
+
+        <WithLabel
+          info="Select the Amplitude data region your project uses"
+          label="Data Residency"
+        >
+          <Select
+            onValueChange={(value) =>
+              form.setValue('dataResidency', value as 'us' | 'eu')
+            }
+            value={form.watch('dataResidency') ?? 'us'}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue placeholder="US (default)" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="us">US (default)</SelectItem>
+              <SelectItem value="eu">EU</SelectItem>
+            </SelectContent>
+          </Select>
+        </WithLabel>
+      </div>
+
+      <div className="flex justify-between">
+        <Button onClick={() => popModal()} type="button" variant="outline">
+          Cancel
+        </Button>
+        <Button disabled={isPending} type="submit">
           {isPending ? 'Starting...' : 'Start Import'}
         </Button>
       </div>
@@ -272,7 +407,7 @@ export default function AddImport({ provider, name }: AddImportProps) {
           description: error.message,
         });
       },
-    }),
+    })
   );
 
   const handleImportSubmit = (config: IImportConfig) => {
@@ -289,16 +424,24 @@ export default function AddImport({ provider, name }: AddImportProps) {
 
       {provider === 'umami' && (
         <UmamiImport
-          onSubmit={handleImportSubmit}
           isPending={createImport.isPending}
+          onSubmit={handleImportSubmit}
           organizationId={organizationId}
         />
       )}
 
       {provider === 'mixpanel' && (
         <MixpanelImport
-          onSubmit={handleImportSubmit}
           isPending={createImport.isPending}
+          onSubmit={handleImportSubmit}
+          organizationId={organizationId}
+        />
+      )}
+
+      {provider === 'amplitude' && (
+        <AmplitudeImport
+          isPending={createImport.isPending}
+          onSubmit={handleImportSubmit}
           organizationId={organizationId}
         />
       )}

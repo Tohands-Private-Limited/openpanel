@@ -1,23 +1,32 @@
-import { useTRPC } from '@/integrations/trpc/react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-
 import { AspectContainer } from '../aspect-container';
+import { ChartWithTable, TableCard } from '../common/chart-with-table';
 import { ReportChartEmpty } from '../common/empty';
 import { ReportChartError } from '../common/error';
 import { ReportChartLoading } from '../common/loading';
 import { useReportChartContext } from '../context';
 import { Chart } from './chart';
-import CohortTable from './table';
+import { CohortTable } from './table';
+import { useTRPC } from '@/integrations/trpc/react';
 
 export function ReportRetentionChart() {
   const { isLazyLoading, report, shareId } = useReportChartContext();
   const eventSeries = report.series.filter((item) => item.type === 'event');
   const firstEvent = (eventSeries[0]?.filters?.[0]?.value ?? []).map(String);
   const secondEvent = (eventSeries[1]?.filters?.[0]?.value ?? []).map(String);
-  const isEnabled =
-    firstEvent.length > 0 && secondEvent.length > 0 && !isLazyLoading;
+  // filters[0] on each retention series is the event-name selector; everything
+  // else is an audience filter (property or cohort) applied to the cohort.
+  // Report-level global filters apply to the whole retention audience too.
+  const filters = [
+    ...(report.globalFilters ?? []),
+    ...eventSeries.flatMap((item) =>
+      (item.filters ?? []).filter((filter) => filter.name !== 'name')
+    ),
+  ];
+  const hasEvents = firstEvent.length > 0 && secondEvent.length > 0;
 
-  const retentionOptions = report.options?.type === 'retention' ? report.options : undefined;
+  const retentionOptions =
+    report.options?.type === 'retention' ? report.options : undefined;
   const criteria = retentionOptions?.criteria ?? 'on_or_after';
 
   const trpc = useTRPC();
@@ -26,6 +35,7 @@ export function ReportRetentionChart() {
       {
         firstEvent,
         secondEvent,
+        filters,
         projectId: report.projectId,
         range: report.range,
         startDate: report.startDate,
@@ -37,12 +47,12 @@ export function ReportRetentionChart() {
       },
       {
         placeholderData: keepPreviousData,
-        enabled: isEnabled,
-      },
-    ),
+        enabled: hasEvents && !isLazyLoading,
+      }
+    )
   );
 
-  if (!isEnabled) {
+  if (!hasEvents) {
     return <Disabled />;
   }
 
@@ -59,12 +69,14 @@ export function ReportRetentionChart() {
   }
 
   return (
-    <div className="col gap-4">
-      <AspectContainer>
-        <Chart data={res.data} />
-      </AspectContainer>
-      <CohortTable data={res.data} />
-    </div>
+    <ChartWithTable
+      chart={<Chart data={res.data} />}
+      tables={
+        <TableCard>
+          <CohortTable data={res.data} />
+        </TableCard>
+      }
+    />
   );
 }
 

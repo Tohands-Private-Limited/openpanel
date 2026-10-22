@@ -1,4 +1,5 @@
-import type { IServiceOrganization } from '@openpanel/db';
+import type { IServiceOrganization } from '@openpanel/core';
+import { getSubscriptionStateMeta } from '@openpanel/payments/subscription-state-meta';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { differenceInDays } from 'date-fns';
 import { useQueryState } from 'nuqs';
@@ -7,7 +8,9 @@ import { toast } from 'sonner';
 import { Progress } from '../ui/progress';
 import { Widget, WidgetBody, WidgetHead } from '../widget';
 import { BillingFaq } from './billing-faq';
+import BillingPlanPicker from './billing-plan-picker';
 import BillingUsage from './billing-usage';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { useNumber } from '@/hooks/use-numer-formatter';
 import useWS from '@/hooks/use-ws';
@@ -50,6 +53,25 @@ export default function Billing({ organization }: Props) {
     })
   );
 
+  const resumeMutation = useMutation(
+    trpc.subscription.resumeSubscription.mutationOptions({
+      onSuccess() {
+        queryClient.invalidateQueries(trpc.organization.pathFilter());
+        queryClient.invalidateQueries(trpc.subscription.pathFilter());
+        toast.success('Subscription resumed', {
+          description: 'It might take a few seconds to update',
+        });
+      },
+      onError(error) {
+        toast.error(error.message);
+      },
+    })
+  );
+
+  const isPauseState =
+    organization.subscriptionState === 'pausing' ||
+    organization.subscriptionState === 'paused';
+
   useWS(`/live/organization/${organization.id}`, () => {
     queryClient.invalidateQueries(trpc.organization.pathFilter());
     queryClient.invalidateQueries(trpc.subscription.pathFilter());
@@ -62,7 +84,11 @@ export default function Billing({ organization }: Props) {
   const products = useMemo(() => {
     return (productsQuery.data || [])
       .filter((product) => product.recurringInterval === recurringInterval)
-      .filter((product) => product.prices.some((p) => p.amountType !== 'free'));
+      .filter((product) =>
+        // `free` no longer exists in the SDK's amountType union, but retired
+        // free-plan products can still come back from Polar's API.
+        product.prices.some((p) => (p.amountType as string) !== 'free')
+      );
   }, [productsQuery.data, recurringInterval]);
 
   const currentProduct = currentProductQuery.data ?? null;
@@ -70,59 +96,79 @@ export default function Billing({ organization }: Props) {
     p.amountType === 'fixed' ? [p] : []
   )[0];
 
-  const renderStatus = () => {
-    if (organization.isActive && organization.subscriptionCurrentPeriodEnd) {
-      return (
-        <p>
-          Your subscription will be renewed on{' '}
-          {formatDate(organization.subscriptionCurrentPeriodEnd)}
-        </p>
-      );
+  // What the customer actually pays while a recurring discount applies. A
+  // `once` discount only hits the next invoice, so the header keeps the list
+  // price and the discount line below explains it.
+  const listPrice = currentPrice ? currentPrice.priceAmount / 100 : null;
+  const discountedPrice = (() => {
+    const active = organization.subscriptionDiscount;
+    if (!active || listPrice === null || active.duration === 'once') {
+      return null;
     }
-
-    if (organization.isCanceled && organization.subscriptionCanceledAt) {
-      return (
-        <p>
-          Your subscription was canceled on{' '}
-          {formatDate(organization.subscriptionCanceledAt)}
-        </p>
-      );
+    if (active.type === 'percentage' && active.basisPoints) {
+      return listPrice * (1 - active.basisPoints / 10_000);
     }
-    if (
-      organization.isWillBeCanceled &&
-      organization.subscriptionCurrentPeriodEnd
-    ) {
-      return (
-        <p className="text-destructive">
-          Your subscription will be canceled on{' '}
-          {formatDate(organization.subscriptionCurrentPeriodEnd)}
-        </p>
-      );
+    if (active.type === 'fixed' && active.amount) {
+      return Math.max(0, listPrice - active.amount / 100);
     }
-
-    if (
-      organization.subscriptionStatus === 'expired' &&
-      organization.subscriptionCurrentPeriodEnd
-    ) {
-      return (
-        <p className="text-destructive">
-          Your subscription expired on{' '}
-          {formatDate(organization.subscriptionCurrentPeriodEnd)}
-        </p>
-      );
-    }
-    if (
-      organization.subscriptionStatus === 'trialing' &&
-      organization.subscriptionEndsAt
-    ) {
-      return (
-        <p>
-          Your trial will end on {formatDate(organization.subscriptionEndsAt)}
-        </p>
-      );
-    }
-
     return null;
+  })();
+
+  // Synced from Polar — covers the cancel-flow save offer and any discount
+  // code the customer redeemed. Without this line the card shows the full
+  // list price and an applied discount is invisible outside Polar's portal.
+  const discount = organization.subscriptionDiscount;
+  const renderDiscount = () => {
+    if (!discount) {
+      return null;
+    }
+    const value =
+      discount.type === 'percentage' && discount.basisPoints
+        ? `−${discount.basisPoints / 100}%`
+        : discount.amount
+          ? `−${number.currency(discount.amount / 100)}`
+          : null;
+    if (!value) {
+      return null;
+    }
+    const duration =
+      discount.duration === 'repeating' && discount.durationInMonths
+        ? `for the next ${discount.durationInMonths} months`
+        : discount.duration === 'forever'
+          ? 'on every invoice'
+          : 'on your next invoice';
+    // Deliberately no discount name here: names are often the redeemable code
+    // itself, and the save offer's name would advertise what the cancel flow
+    // grants. The value + duration is all the customer needs.
+    return (
+      <p className="mt-1 text-emerald-600 dark:text-emerald-500">
+        {value} {duration}
+      </p>
+    );
+  };
+
+  const renderStatus = () => {
+    const meta = getSubscriptionStateMeta(organization.subscriptionState, {
+      endsAt: organization.subscriptionEndsAt,
+      canceledAt: organization.subscriptionCanceledAt,
+      resumesAt: organization.subscriptionResumesAt,
+    });
+
+    if (!meta.statusLine) {
+      return null;
+    }
+
+    return (
+      <p
+        className={
+          meta.statusLine.tone === 'destructive'
+            ? 'text-destructive'
+            : undefined
+        }
+      >
+        {meta.statusLine.text}
+      </p>
+    );
   };
 
   useEffect(() => {
@@ -131,23 +177,31 @@ export default function Billing({ organization }: Props) {
     }
   }, [success]);
 
-  // Clear query state when modal is closed
   useOnPushModal('BillingSuccess', (open) => {
     if (!open) {
       setSuccess(null);
     }
   });
 
-  return (
-    <div className="grid grid-cols-1 gap-8 md:grid-cols-2">
-      <div className="col gap-8">
-        {currentProduct && currentPrice ? (
+  // Active subscribers manage an existing plan: current-plan card + usage on the
+  // left, FAQ on the right. Plan changes go through the modal.
+  if (currentProduct && currentPrice) {
+    return (
+      <div className="grid grid-cols-1 gap-8 md:grid-cols-2">
+        <div className="col gap-8">
           <Widget className="w-full">
             <WidgetHead className="flex items-center justify-between gap-4">
               <div className="title flex-1 truncate">{currentProduct.name}</div>
               <div className="text-lg">
+                {discountedPrice !== null && (
+                  <span className="mr-2 text-muted-foreground line-through">
+                    {number.currency(currentPrice.priceAmount / 100)}
+                  </span>
+                )}
                 <span className="font-bold">
-                  {number.currency(currentPrice.priceAmount / 100)}
+                  {number.currency(
+                    discountedPrice ?? currentPrice.priceAmount / 100
+                  )}
                 </span>
                 <span className="text-muted-foreground">
                   {' / '}
@@ -157,6 +211,7 @@ export default function Billing({ organization }: Props) {
             </WidgetHead>
             <WidgetBody>
               {renderStatus()}
+              {renderDiscount()}
               <div className="col mt-4">
                 <div className="mb-2 font-semibold">
                   {number.format(organization.subscriptionPeriodEventsCount)} /{' '}
@@ -172,6 +227,7 @@ export default function Billing({ organization }: Props) {
                 />
                 <div className="row mt-4 justify-between">
                   <Button
+                    loading={portalMutation.isPending}
                     onClick={() =>
                       portalMutation.mutate({ organizationId: organization.id })
                     }
@@ -202,89 +258,99 @@ export default function Billing({ organization }: Props) {
                     </svg>
                     Customer portal
                   </Button>
-                  <Button
-                    onClick={() =>
-                      pushModal('SelectBillingPlan', {
-                        organization,
-                        currentProduct,
-                      })
-                    }
-                    size="sm"
-                  >
-                    {organization.isWillBeCanceled
-                      ? 'Reactivate subscription'
-                      : 'Change subscription'}
-                  </Button>
+                  <div className="row gap-2">
+                    {isPauseState && (
+                      <Button
+                        loading={resumeMutation.isPending}
+                        onClick={() =>
+                          resumeMutation.mutate({
+                            organizationId: organization.id,
+                          })
+                        }
+                        size="sm"
+                      >
+                        {organization.subscriptionState === 'paused'
+                          ? 'Resume subscription'
+                          : 'Keep subscription'}
+                      </Button>
+                    )}
+                    <Button
+                      onClick={() =>
+                        pushModal('SelectBillingPlan', {
+                          organization,
+                          currentProduct,
+                        })
+                      }
+                      size="sm"
+                      variant={isPauseState ? 'outline' : 'default'}
+                    >
+                      {organization.isWillBeCanceled
+                        ? 'Reactivate subscription'
+                        : 'Change subscription'}
+                    </Button>
+                  </div>
                 </div>
               </div>
             </WidgetBody>
           </Widget>
-        ) : (
-          <Widget className="w-full">
-            <WidgetHead className="flex items-center justify-between">
-              <div className="flex-1 font-bold text-lg">
-                {organization.isTrial
-                  ? 'Get started'
-                  : 'No active subscription'}
-              </div>
-              <div className="text-muted-foreground">
-                {organization.isTrial ? '30 days free trial' : ''}
-              </div>
-            </WidgetHead>
-            <WidgetBody>
-              {organization.isTrial && organization.subscriptionEndsAt ? (
-                <p>
-                  Your trial will end on{' '}
-                  {formatDate(organization.subscriptionEndsAt)} (
-                  {differenceInDays(
-                    organization.subscriptionEndsAt,
-                    new Date()
-                  ) + 1}{' '}
-                  days left)
-                </p>
-              ) : (
-                <p>
-                  Your trial has expired. Please upgrade your account to
-                  continue using Openpanel.
-                </p>
-              )}
-              <div className="col mt-4">
-                <div className="mb-2 font-semibold">
-                  {number.format(organization.subscriptionPeriodEventsCount)} /{' '}
-                  {number.format(
-                    Number(organization.subscriptionPeriodEventsLimit)
-                  )}
-                </div>
-                <Progress
-                  size="sm"
-                  value={
-                    (organization.subscriptionPeriodEventsCount /
-                      Number(organization.subscriptionPeriodEventsLimit)) *
-                    100
-                  }
-                />
-                <div className="row mt-4 justify-end">
-                  <Button
-                    onClick={() =>
-                      pushModal('SelectBillingPlan', {
-                        organization,
-                        currentProduct,
-                      })
-                    }
-                    size="sm"
-                  >
-                    Upgrade
-                  </Button>
-                </div>
-              </div>
-            </WidgetBody>
-          </Widget>
-        )}
 
-        <BillingUsage organization={organization} />
+          <BillingUsage organization={organization} />
+        </div>
+
+        <BillingFaq />
       </div>
+    );
+  }
 
-      <BillingFaq />
+  // Trial / expired / canceled / unpaid: there's no plan to manage yet, so the
+  // plan picker is the focus. A slim status strip replaces the old tall card
+  // (which showed a meaningless "0 / 0" bar during trials).
+  const daysLeft = organization.subscriptionEndsAt
+    ? differenceInDays(organization.subscriptionEndsAt, new Date()) + 1
+    : null;
+
+  return (
+    <div className="col gap-8">
+      <Widget className="w-full">
+        <WidgetBody className="col gap-2">
+          <div className="row items-center gap-2">
+            <Badge variant={organization.isTrial ? 'secondary' : 'destructive'}>
+              {organization.isTrial ? 'Free trial' : 'No active plan'}
+            </Badge>
+            {organization.isTrial && daysLeft !== null && (
+              <span className="font-semibold">{daysLeft} days left</span>
+            )}
+          </div>
+          {organization.isTrial && organization.subscriptionEndsAt ? (
+            <p className="text-muted-foreground">
+              Your trial ends on {formatDate(organization.subscriptionEndsAt)}.
+              When it ends, your dashboards pause until you choose a plan — your
+              data keeps flowing in.
+            </p>
+          ) : (
+            renderStatus()
+          )}
+        </WidgetBody>
+      </Widget>
+
+      <div className="grid grid-cols-1 gap-8 lg:grid-cols-2">
+        <Widget className="w-full self-start">
+          <WidgetHead>
+            <div className="title">Choose a plan</div>
+          </WidgetHead>
+          <WidgetBody className="col gap-4">
+            <BillingPlanPicker
+              currentProduct={currentProduct}
+              organization={organization}
+            />
+          </WidgetBody>
+        </Widget>
+
+        <div className="col gap-8">
+          <BillingUsage organization={organization} />
+          <BillingFaq />
+        </div>
+      </div>
     </div>
   );
 }

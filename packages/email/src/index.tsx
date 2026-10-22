@@ -1,12 +1,19 @@
-import React from 'react';
+import { db } from '@openpanel/db';
 import { render } from '@react-email/render';
 import { createTransport } from 'nodemailer';
 import { Resend } from 'resend';
 import type { z } from 'zod';
-
-import { db } from '@openpanel/db';
 import { type TemplateKey, type Templates, templates } from './emails';
 import { getUnsubscribeUrl } from './unsubscribe';
+
+/** a***@example.com: enough to correlate a log line without exposing the address. */
+function redactEmail(email: string): string {
+  const at = email.indexOf('@');
+  if (at <= 0) {
+    return '***';
+  }
+  return `${email[0]}***${email.slice(at)}`;
+}
 
 export * from './unsubscribe';
 
@@ -35,7 +42,7 @@ export async function sendEmail<T extends TemplateKey>(
   options: {
     to: string;
     data: z.infer<Templates[T]['schema']>;
-  },
+  }
 ) {
   const { to, data } = options;
   const template = templates[templateKey];
@@ -58,7 +65,7 @@ export async function sendEmail<T extends TemplateKey>(
 
     if (unsubscribed) {
       console.log(
-        `Skipping email to ${to} - unsubscribed from ${template.category}`,
+        `Skipping email to ${to} - unsubscribed from ${template.category}`
       );
       return null;
     }
@@ -77,7 +84,7 @@ export async function sendEmail<T extends TemplateKey>(
   if (process.env.SMTP_HOST) {
     try {
       const html = await render(
-        <template.Component {...(props.data as any)} />,
+        <template.Component {...(props.data as any)} />
       );
       const transport = createSmtpTransport();
       const res = await transport.sendMail({
@@ -95,11 +102,12 @@ export async function sendEmail<T extends TemplateKey>(
   }
 
   if (!process.env.RESEND_API_KEY) {
-    console.log('No SMTP_HOST or RESEND_API_KEY found, here is the data');
-    console.log('Template:', template);
-    console.log('Subject: ', subject);
-    console.log('To:      ', to);
-    console.log('Data:    ', JSON.stringify(data, null, 2));
+    // Never dump the payload: template data carries password-reset and
+    // unsubscribe links, and the recipient is personal data
+    // (GHSA-xr2x-w49w-hp2c).
+    console.warn(
+      `Email not sent (email_provider_not_configured): template=${templateKey} to=${redactEmail(to)}`
+    );
     return null;
   }
 

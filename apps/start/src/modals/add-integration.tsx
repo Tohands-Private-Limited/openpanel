@@ -1,26 +1,24 @@
-import { useTRPC } from '@/integrations/trpc/react';
-
-import { DiscordIntegrationForm } from '@/components/integrations/forms/discord-integration';
-import { SlackIntegrationForm } from '@/components/integrations/forms/slack-integration';
-import { WebhookIntegrationForm } from '@/components/integrations/forms/webhook-integration';
-import { IntegrationCardContent } from '@/components/integrations/integration-card';
-import { INTEGRATIONS } from '@/components/integrations/integrations';
-import { SheetContent } from '@/components/ui/sheet';
-import { useAppParams } from '@/hooks/use-app-params';
-import type { IIntegrationConfig } from '@openpanel/validation';
+import type { IIntegrationConfig } from '@openpanel/core/modules/integration/integration.constants';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
-import { useQueryState } from 'nuqs';
 import { toast } from 'sonner';
 import { popModal } from '.';
 import { ModalHeader } from './Modal/Container';
+import { IntegrationCardContent } from '@/components/integrations/integration-card';
+import {
+  CLIENT_INTEGRATIONS,
+  INTEGRATIONS,
+} from '@/components/integrations/integrations';
+import { SheetContent } from '@/components/ui/sheet';
+import { useAppParams } from '@/hooks/use-app-params';
+import { useTRPC } from '@/integrations/trpc/react';
 
 interface Props {
   id?: string;
   type: IIntegrationConfig['type'];
 }
 export default function AddIntegration(props: Props) {
-  const { organizationId } = useAppParams();
+  const { organizationId, projectId } = useAppParams();
   const trpc = useTRPC();
   const query = useQuery(
     trpc.integration.get.queryOptions(
@@ -29,8 +27,8 @@ export default function AddIntegration(props: Props) {
       },
       {
         enabled: !!props.id,
-      },
-    ),
+      }
+    )
   );
 
   const integration = INTEGRATIONS.find((i) => i.type === props.type);
@@ -53,12 +51,13 @@ export default function AddIntegration(props: Props) {
     popModal();
     client.invalidateQueries(trpc.integration.list.pathFilter());
     client.invalidateQueries(
-      trpc.integration.get.queryFilter({ id: props.id }),
+      trpc.integration.get.queryFilter({ id: props.id })
     );
     navigate({
-      to: '/$organizationId/integrations/installed',
+      to: '/$organizationId/$projectId/integrations/installed',
       params: {
         organizationId,
+        projectId,
       },
     });
   };
@@ -68,31 +67,11 @@ export default function AddIntegration(props: Props) {
       return null;
     }
 
-    switch (integration?.type) {
-      case 'webhook':
-        return (
-          <WebhookIntegrationForm
-            defaultValues={query.data}
-            onSuccess={handleSuccess}
-          />
-        );
-      case 'discord':
-        return (
-          <DiscordIntegrationForm
-            defaultValues={query.data}
-            onSuccess={handleSuccess}
-          />
-        );
-      case 'slack':
-        return (
-          <SlackIntegrationForm
-            defaultValues={query.data}
-            onSuccess={handleSuccess}
-          />
-        );
-      default:
-        return null;
+    const Form = CLIENT_INTEGRATIONS[props.type]?.Form;
+    if (!Form) {
+      return null;
     }
+    return <Form defaultValues={query.data} onSuccess={handleSuccess} />;
   };
 
   return (

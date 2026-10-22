@@ -1,11 +1,12 @@
-import { round } from '@openpanel/common';
-import type { IServiceSession } from '@openpanel/db';
+import type { IServiceSession } from '@openpanel/core';
+import { round } from '@openpanel/shared';
 import type { ColumnDef } from '@tanstack/react-table';
 import { Video } from 'lucide-react';
 import { ColumnCreatedAt } from '@/components/column-created-at';
 import { ProjectLink } from '@/components/links';
 import { ProfileAvatar } from '@/components/profiles/profile-avatar';
 import { SerieIcon } from '@/components/report-chart/common/serie-icon';
+import { useNumber } from '@/hooks/use-numer-formatter';
 import { getProfileName } from '@/utils/getters';
 
 function formatDuration(milliseconds: number): string {
@@ -26,6 +27,7 @@ function formatDuration(milliseconds: number): string {
 }
 
 export function useColumns() {
+  const number = useNumber();
   const columns: ColumnDef<IServiceSession>[] = [
     {
       accessorKey: 'createdAt',
@@ -46,8 +48,9 @@ export function useColumns() {
           <div className="row items-center gap-2">
             <ProjectLink
               className="font-medium"
-              href={`/sessions/${session.id}`}
+              params={{ sessionId: session.id }}
               title={session.id}
+              to="/sessions/$sessionId"
             >
               {session.id.slice(0, 8)}...
             </ProjectLink>
@@ -55,8 +58,10 @@ export function useColumns() {
               <ProjectLink
                 aria-label="View replay"
                 className="text-muted-foreground hover:text-foreground"
-                href={`/sessions/${session.id}#replay`}
+                hash="replay"
+                params={{ sessionId: session.id }}
                 title="View replay"
+                to="/sessions/$sessionId"
               >
                 <Video className="size-4" />
               </ProjectLink>
@@ -75,7 +80,8 @@ export function useColumns() {
           return (
             <ProjectLink
               className="row items-center gap-2 font-medium hover:underline"
-              href={`/profiles/${encodeURIComponent(session.profile.id)}`}
+              params={{ profileId: session.profile.id }}
+              to="/profiles/$profileId"
             >
               <ProfileAvatar size="sm" {...session.profile} />
               {getProfileName(session.profile)}
@@ -84,8 +90,9 @@ export function useColumns() {
         }
         return (
           <ProjectLink
-            className="font-medium font-mono"
-            href={`/profiles/${encodeURIComponent(session.profileId)}`}
+            className="font-medium tabular-nums"
+            params={{ profileId: session.profileId }}
+            to="/profiles/$profileId"
           >
             {session.profileId}
           </ProjectLink>
@@ -100,7 +107,7 @@ export function useColumns() {
         const session = row.original;
         return (
           <div className="min-w-0">
-            <span className="font-mono">{session.entryPath || '/'}</span>
+            <span className="tabular-nums">{session.entryPath || '/'}</span>
           </div>
         );
       },
@@ -113,7 +120,7 @@ export function useColumns() {
         const session = row.original;
         return (
           <div className="min-w-0">
-            <span className="font-mono">
+            <span className="tabular-nums">
               {session.exitPath || session.entryPath || '/'}
             </span>
           </div>
@@ -258,7 +265,7 @@ export function useColumns() {
         const session = row.original;
         return session.revenue > 0 ? (
           <div className="font-medium text-green-600">
-            ${session.revenue.toFixed(2)}
+            {number.currency(session.revenue / 100)}
           </div>
         ) : (
           <div className="text-muted-foreground">-</div>
@@ -276,13 +283,15 @@ export function useColumns() {
       size: 200,
       cell: ({ row }) => {
         const { groups } = row.original;
-        if (!groups?.length) return null;
+        if (!groups?.length) {
+          return null;
+        }
         return (
           <div className="flex flex-wrap gap-1">
             {groups.map((g) => (
               <span
+                className="rounded bg-muted px-1.5 py-0.5 text-xs tabular-nums"
                 key={g}
-                className="rounded bg-muted px-1.5 py-0.5 text-xs font-mono"
               >
                 {g}
               </span>

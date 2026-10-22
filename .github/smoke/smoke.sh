@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+#
+# Boots the app images against real Postgres/Redis/ClickHouse and asserts they
+# actually serve traffic. Two images, three services: the worker is the api image run as ROLE=worker.
+#
+# Why this exists: main-8e60 built green, pushed green, and every dashboard
+# route returned 500 (`r.createEffectfulFunction is not a function`) because a
+# dependency re-resolve inside the build stage bundled two incompatible copies
+# of seroval. Nothing in CI ever started the image, so the first person to find
+# out was a self-hoster. The container's own healthcheck could not have caught
+# it either — see the note in docker-compose.yml.
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+for var in OP_API_IMAGE OP_DASHBOARD_IMAGE; do
+  if [ -z "${!var:-}" ]; then
+    echo "::error::$var is not set"
+    exit 1
+  fi
+done
+
+DASHBOARD="http://localhost:3000"
+API="http://localhost:3333"
+WORKER="http://localhost:9999"
+
+fail() {
+  echo "::error::$*"
+  echo "--- container status ---"
+  docker compose ps || true
+  for svc in op-api op-worker op-dashboard op-rp; do
+    echo "--- $svc logs ---"
+    docker compose logs --no-color --tail=200 "$svc" || true
+  done
+  exit 1
+}
+
+# Waits for a URL to return 2xx. Health-gated startup already covers most of
+# this, but the dashboard has no dependency edge that guarantees it is listening
+# the instant op-api reports healthy.
+wait_for() {
+  local name="$1" url="$2" tries=60
+  echo "waiting for $name at $url"
+  for _ in $(seq $tries); do
+    if curl -fsS -o /dev/null --max-time 5 "$url"; then
+      echo "  $name is up"
+      return 0
+    fi
+    sleep 5
+  done
+  fail "$name never became reachable at $url"
+}
+
+# The real assertion. Renders a route through SSR and requires a genuine HTML
+# document back. A 500 here is the seroval class of bug; a 200 with a stub body
+# would mean SSR silently degraded.
+assert_ssr_route() {
+  local path="$1" body status
+  echo "asserting SSR route $path"
+
+  status=$(curl -sS -o /tmp/ssr-body -w '%{http_code}' --max-time 30 "$DASHBOARD$path" || echo "000")
+  body=$(cat /tmp/ssr-body 2>/dev/null || true)
+
+  if [ "$status" != "200" ]; then
+    echo "--- response body (first 60 lines) ---"
+    head -60 <<<"$body"
+    fail "$path returned HTTP $status (expected 200)"
+  fi
+
+  case "$body" in
+    *"<html"*) ;;
+    *) head -40 <<<"$body"; fail "$path returned 200 but no <html> — SSR did not render" ;;
+  esac
+
+  if [ "${#body}" -lt 1000 ]; then
+    echo "$body"
+    fail "$path rendered only ${#body} bytes — suspiciously empty for an SSR page"
+  fi
+
+  echo "  $path OK (HTTP 200, ${#body} bytes)"
+}
+
+# The api container's start command runs `prisma migrate deploy` before it
+# boots, and `sh -c` does not stop on a failed line — so a broken migration
+# step is invisible: the api starts anyway and every probe stays green. That is
+# exactly how an image whose start command could not find the Prisma CLI once shipped. Assert the step's own success line instead.
+assert_migrations_ran() {
+  local logs
+  logs=$(docker compose logs --no-color op-api 2>/dev/null || true)
+
+  if grep -qE 'sh: .*: not found|command not found' <<<"$logs"; then
+    echo "--- matching lines ---"
+    grep -nE 'sh: .*: not found|command not found' <<<"$logs" | head -20 || true
+    fail "op-api's start command could not find a binary it invokes"
+  fi
+  if ! grep -q 'migrations have been successfully applied\|No pending migrations to apply' <<<"$logs"; then
+    echo "--- op-api logs (first 80 lines) ---"
+    head -80 <<<"$logs"
+    fail "op-api never reported a successful 'prisma migrate deploy'"
+  fi
+  echo "  op-api migrations applied"
+}
+
+# An SSR failure that gets swallowed into a 200 would still show up here.
+assert_no_server_errors() {
+  local svc="$1" logs
+  logs=$(docker compose logs --no-color "$svc" 2>/dev/null || true)
+
+  # These are the shapes a broken bundle or a missing dependency takes.
+  if grep -qE "is not a function|Cannot find (module|package)|ERR_MODULE_NOT_FOUND|ERR_PACKAGE_PATH_NOT_EXPORTED" <<<"$logs"; then
+    echo "--- matching lines ---"
+    grep -nE "is not a function|Cannot find (module|package)|ERR_MODULE_NOT_FOUND|ERR_PACKAGE_PATH_NOT_EXPORTED" <<<"$logs" | head -20 || true
+    fail "$svc logged a module/runtime resolution error"
+  fi
+  echo "  $svc logs clean"
+}
+
+echo "==> starting stack"
+docker compose up -d --wait --wait-timeout 420 || fail "stack never became healthy"
+
+echo "==> service reachability"
+wait_for "api" "$API/healthcheck"
+wait_for "worker" "$WORKER/healthz/ready"
+wait_for "dashboard" "$DASHBOARD/api/healthcheck"
+
+echo "==> database migrations"
+assert_migrations_ran
+
+echo "==> SSR rendering (the check that would have caught main-8e60)"
+assert_ssr_route "/login"
+
+echo "==> server logs"
+assert_no_server_errors op-api
+assert_no_server_errors op-worker
+assert_no_server_errors op-dashboard
+
+echo "==> smoke passed"

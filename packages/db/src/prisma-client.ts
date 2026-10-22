@@ -1,33 +1,47 @@
-import { type Organization, PrismaClient } from './generated/prisma/client';
+import { getSubscriptionState } from '@openpanel/payments/subscription-state';
+import { PrismaClient } from './generated/prisma/client';
+import { logger } from './logger';
 
 export * from './generated/prisma/client';
 
-const isWillBeCanceled = (
-  organization: Pick<
-    Organization,
-    'subscriptionStatus' | 'subscriptionCanceledAt' | 'subscriptionEndsAt'
-  >
-) =>
-  organization.subscriptionStatus === 'active' &&
-  organization.subscriptionCanceledAt &&
-  organization.subscriptionEndsAt;
-
-const isCanceled = (
-  organization: Pick<
-    Organization,
-    'subscriptionStatus' | 'subscriptionCanceledAt'
-  >
-) =>
-  organization.subscriptionStatus === 'canceled' &&
-  organization.subscriptionCanceledAt &&
-  organization.subscriptionCanceledAt < new Date();
+const subscriptionStateNeeds = {
+  subscriptionStatus: true,
+  subscriptionCanceledAt: true,
+  subscriptionEndsAt: true,
+  subscriptionPauseAtPeriodEnd: true,
+} as const;
 
 const getPrismaClient = () => {
-  const prisma = new PrismaClient({
-    log: ['error'],
-  }).$extends({
+  // emit: 'event' keeps the engine from writing prisma:error lines straight
+  // to stderr, so they flow through pino to the OTLP pipeline instead.
+  const client = new PrismaClient({
+    // Prisma's default error format splices file, line and a source snippet
+    // into messages that reach API clients verbatim. `minimal` keeps our
+    // source layout out of a 500.
+    errorFormat: 'minimal',
+    log: [
+      { emit: 'event', level: 'error' },
+      { emit: 'event', level: 'warn' },
+    ],
+  });
+
+  // $on only exists on the base client — keep it before $extends.
+  client.$on('error', (event) => {
+    logger.error({ target: event.target }, `prisma: ${event.message}`);
+  });
+  client.$on('warn', (event) => {
+    logger.warn({ target: event.target }, `prisma: ${event.message}`);
+  });
+
+  const prisma = client.$extends({
     result: {
       organization: {
+        subscriptionState: {
+          needs: subscriptionStateNeeds,
+          compute(org) {
+            return getSubscriptionState(org);
+          },
+        },
         subscriptionStatus: {
           needs: { subscriptionStatus: true, subscriptionCanceledAt: true },
           compute(org) {
@@ -39,19 +53,18 @@ const getPrismaClient = () => {
           },
         },
         hasSubscription: {
-          needs: { subscriptionStatus: true, subscriptionEndsAt: true },
+          needs: subscriptionStateNeeds,
           compute(org) {
-            if (process.env.SELF_HOSTED === 'true') {
-              return false;
-            }
-
-            if (
-              [null, 'canceled', 'trialing'].includes(org.subscriptionStatus)
-            ) {
-              return false;
-            }
-
-            return true;
+            const state = getSubscriptionState(org);
+            return (
+              state === 'active' ||
+              state === 'canceling' ||
+              state === 'pausing' ||
+              state === 'paused' ||
+              state === 'past_due' ||
+              state === 'unpaid' ||
+              state === 'incomplete'
+            );
           },
         },
         slug: {
@@ -84,88 +97,39 @@ const getPrismaClient = () => {
               return org.subscriptionEndsAt;
             }
 
-            // Hedge against edge cases :D
             return new Date(Date.now() + 1000 * 60 * 60 * 24);
           },
         },
         isActive: {
-          needs: {
-            subscriptionStatus: true,
-            subscriptionEndsAt: true,
-            subscriptionCanceledAt: true,
-          },
+          needs: subscriptionStateNeeds,
           compute(org) {
-            if (process.env.SELF_HOSTED === 'true') {
-              return true;
-            }
-
-            return (
-              org.subscriptionStatus === 'active' &&
-              org.subscriptionEndsAt &&
-              org.subscriptionEndsAt > new Date() &&
-              !isCanceled(org) &&
-              !isWillBeCanceled(org)
-            );
+            const state = getSubscriptionState(org);
+            return state === 'active' || state === 'self_hosted';
           },
         },
         isTrial: {
-          needs: { subscriptionStatus: true, subscriptionEndsAt: true },
+          needs: subscriptionStateNeeds,
           compute(org) {
-            const isSubscriptionInFuture =
-              org.subscriptionEndsAt && org.subscriptionEndsAt > new Date();
-            return (
-              (org.subscriptionStatus === 'trialing' ||
-                org.subscriptionStatus === null) &&
-              isSubscriptionInFuture
-            );
+            return getSubscriptionState(org) === 'trialing';
           },
         },
         isCanceled: {
-          needs: { subscriptionStatus: true, subscriptionCanceledAt: true },
+          needs: subscriptionStateNeeds,
           compute(org) {
-            if (process.env.SELF_HOSTED === 'true') {
-              return false;
-            }
-
-            return isCanceled(org);
+            return getSubscriptionState(org) === 'canceled';
           },
         },
         isWillBeCanceled: {
-          needs: {
-            subscriptionStatus: true,
-            subscriptionCanceledAt: true,
-            subscriptionEndsAt: true,
-          },
+          needs: subscriptionStateNeeds,
           compute(org) {
-            if (process.env.SELF_HOSTED === 'true') {
-              return false;
-            }
-
-            return isWillBeCanceled(org);
+            return getSubscriptionState(org) === 'canceling';
           },
         },
         isExpired: {
-          needs: {
-            subscriptionEndsAt: true,
-            subscriptionStatus: true,
-            subscriptionCanceledAt: true,
-          },
+          needs: subscriptionStateNeeds,
           compute(org) {
-            if (process.env.SELF_HOSTED === 'true') {
-              return false;
-            }
-
-            if (isCanceled(org)) {
-              return false;
-            }
-
-            if (isWillBeCanceled(org)) {
-              return false;
-            }
-
-            return (
-              org.subscriptionEndsAt && org.subscriptionEndsAt < new Date()
-            );
+            const state = getSubscriptionState(org);
+            return state === 'expired' || state === 'trial_expired';
           },
         },
         isExceeded: {

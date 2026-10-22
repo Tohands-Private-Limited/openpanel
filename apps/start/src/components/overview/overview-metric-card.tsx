@@ -1,23 +1,27 @@
-import { useFormatDateInterval } from '@/hooks/use-format-date-interval';
-import { fancyMinutes, useNumber } from '@/hooks/use-numer-formatter';
-import { cn } from '@/utils/cn';
-import { timeWindows } from '@openpanel/constants';
-import { getPreviousMetric } from '@openpanel/common';
-import type { IInterval } from '@openpanel/validation';
-import { curveMonotoneX } from '@visx/curve';
+import type { IInterval } from '@openpanel/core/modules/report/report.constants';
+import { timeWindows } from '@openpanel/core/modules/report/report.constants';
 import { type ReactNode, useState } from 'react';
-import { Area } from '../charts/area';
-import { AreaChart } from '../charts/area-chart';
-import { useDashedTail } from '../charts/op-dashed-tail';
+import { getPreviousMetric } from '../../utils/previous-metric';
+import { Bar } from '../charts/bar';
+import { BarChart } from '../charts/bar-chart';
 import {
   OPStatHoverBridge,
   type OPStatHoverState,
 } from '../charts/op-stat-hover-bridge';
 import { PreviousDiffIndicatorPure } from '../report-chart/common/previous-diff-indicator';
 import { Skeleton } from '../skeleton';
+import { useFormatDateInterval } from '@/hooks/use-format-date-interval';
+import { fancyMinutes, useNumber } from '@/hooks/use-numer-formatter';
+import { cn } from '@/utils/cn';
 import { formatDate as formatAbsoluteDate, timeAgo } from '@/utils/date';
 
 const PRIMARY_COLOR = 'var(--chart-0)';
+const METRIC_ERROR_LABEL = 'Could not load';
+// A tall card's bars get the report bars' rounding; the 40px sparkline's thin bars only a hint of it.
+const BAR_RADIUS = 4;
+const SPARKLINE_BAR_RADIUS = 1;
+// Below this a count fits the card in full ("25,412"); above it we compact to "12M".
+const FULL_NUMBER_LIMIT = 10_000_000;
 
 export type MetricUnit = '' | 'date' | 'timeAgo' | 'min' | '%' | 'currency';
 
@@ -38,14 +42,17 @@ interface MetricCardProps {
   active?: boolean;
   inverted?: boolean;
   isLoading?: boolean;
+  /** The metric failed to load: show that instead of a value that reads as real. */
+  isError?: boolean;
   /** Interval drives the hover-label date format. */
   interval?: IInterval;
   /** Range drives the default label ("Last 30 days") and dashed-tail logic. */
   range?: keyof typeof timeWindows;
+  /** Stretch to the parent's height; the sparkline takes the extra room. */
+  fill?: boolean;
 }
 
 export function OverviewMetricCard({
-  id,
   data,
   metric,
   unit,
@@ -54,8 +61,10 @@ export function OverviewMetricCard({
   active,
   inverted = false,
   isLoading = false,
+  isError = false,
   interval = 'day',
   range,
+  fill = false,
 }: MetricCardProps) {
   const formatDate = useFormatDateInterval({ interval, short: false });
   const [hover, setHover] = useState<
@@ -72,62 +81,67 @@ export function OverviewMetricCard({
     : (range ? timeWindows[range]?.label : 'Total') || 'Total';
 
   const diff = getPreviousMetric(displayValue, displayPrev);
-  const dashFromIndex = useDashedTail({ data, range, interval });
+  const hasValue = !(isLoading || isError);
+  // While loading the sparkline area keeps its height so the card does not jump.
+  const hasSparkline = isLoading || data.length > 0;
 
   return (
-    <MetricCardShell active={active} onClick={onClick}>
+    <MetricCardShell
+      active={active}
+      className={cn(fill && 'h-full')}
+      onClick={onClick}
+    >
       <div className="px-3 pt-2.5">
         <div className="flex items-start justify-between gap-2">
-          <span className="truncate text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+          <span className="truncate font-medium text-3xs text-muted-foreground uppercase tracking-wider">
             {label}
           </span>
-          {isLoading ? null : (
-            <PreviousDiffIndicatorPure
-              {...diff}
-              inverted={inverted}
-              size="xs"
-            />
+          {hasValue && (
+            <div className="absolute top-2.5 right-3">
+              <PreviousDiffIndicatorPure
+                {...diff}
+                inverted={inverted}
+                size="xs"
+              />
+            </div>
           )}
         </div>
-        <div className="mt-1 flex items-baseline gap-0.5 leading-none">
-          {isLoading ? (
-            <Skeleton className="h-5 w-20" />
-          ) : (
-            <MetricValue value={displayValue} unit={unit} />
-          )}
+        <div className="-my-0.5 flex items-baseline gap-0.5 leading-none">
+          {isLoading && <Skeleton className="h-5 w-20" />}
+          {isError && <span className={VALUE_CLASS}>—</span>}
+          {hasValue && <MetricValue unit={unit} value={displayValue} />}
         </div>
-        <div className="mt-0.5 truncate text-[11px] leading-none text-muted-foreground">
-          {displayLabel}
+        <div className="mt-0.5 truncate text-2xs text-muted-foreground leading-none">
+          {isError ? METRIC_ERROR_LABEL : displayLabel}
         </div>
       </div>
 
-      <div className="mt-1.5 h-[40px]">
-        {data.length > 0 && (
-          <AreaChart
-            data={data}
-            xDataKey="date"
-            aspectRatio="auto"
-            className="h-full"
-            margin={{ top: 6, right: 0, bottom: 4, left: 0 }}
+      {hasSparkline ? (
+        <div
+          className={cn('mt-1.5', fill ? 'min-h-[40px] flex-1' : 'h-[40px]')}
+        >
+          <BarChart
             animationDuration={0}
+            aspectRatio="auto"
+            barGap={0.25}
+            className="h-full"
+            data={data}
+            margin={{ top: 6, right: 0, bottom: 0, left: 0 }}
+            xDataKey="date"
           >
             <OPStatHoverBridge onHoverChange={setHover} />
-            <Area
-              dataKey="current"
-              stroke={PRIMARY_COLOR}
-              fill={PRIMARY_COLOR}
-              fillOpacity={active ? 0.25 : 0.16}
-              gradientToOpacity={0}
-              strokeWidth={1.5}
-              curve={curveMonotoneX}
-              fadeEdges={false}
+            <Bar
               animate={false}
-              dashFromIndex={dashFromIndex}
-              dashArray="3,3"
+              dataKey="current"
+              fadedOpacity={0.35}
+              fill={PRIMARY_COLOR}
+              lineCap={fill ? BAR_RADIUS : SPARKLINE_BAR_RADIUS}
             />
-          </AreaChart>
-        )}
-      </div>
+          </BarChart>
+        </div>
+      ) : (
+        <div className="h-3" />
+      )}
     </MetricCardShell>
   );
 }
@@ -151,15 +165,15 @@ export function MetricCardShell({
   const Tag: 'button' | 'div' = onClick ? 'button' : 'div';
   return (
     <Tag
-      type={onClick ? 'button' : undefined}
-      onClick={onClick}
       className={cn(
         'group relative flex flex-col overflow-hidden text-left',
         'shadow-[0_0_0_0.5px] shadow-border transition-colors',
         active ? 'bg-def-100' : 'bg-card hover:bg-def-100/50',
         onClick && 'cursor-pointer',
-        className,
+        className
       )}
+      onClick={onClick}
+      type={onClick ? 'button' : undefined}
     >
       {active && (
         <span
@@ -173,7 +187,7 @@ export function MetricCardShell({
 }
 
 const VALUE_CLASS =
-  'truncate font-mono font-semibold text-xl text-foreground tracking-tight tabular-nums';
+  'truncate font-mono font-semibold text-foreground text-xl tracking-tight tabular-nums';
 
 function MetricValue({ value, unit }: { value: number; unit?: MetricUnit }) {
   const number = useNumber();
@@ -188,7 +202,9 @@ function MetricValue({ value, unit }: { value: number; unit?: MetricUnit }) {
 
   if (unit === 'timeAgo') {
     return (
-      <span className={VALUE_CLASS}>{value ? timeAgo(new Date(value)) : 'N/A'}</span>
+      <span className={VALUE_CLASS}>
+        {value ? timeAgo(new Date(value)) : 'N/A'}
+      </span>
     );
   }
 
@@ -197,9 +213,12 @@ function MetricValue({ value, unit }: { value: number; unit?: MetricUnit }) {
   }
 
   if (unit === 'currency') {
+    const amount = value / 100;
     return (
       <span className={VALUE_CLASS}>
-        {number.currency(value / 100, { short: true })}
+        {number.currency(amount, {
+          short: Math.abs(amount) >= FULL_NUMBER_LIMIT,
+        })}
       </span>
     );
   }
@@ -208,12 +227,17 @@ function MetricValue({ value, unit }: { value: number; unit?: MetricUnit }) {
     return (
       <>
         <span className={VALUE_CLASS}>{number.format(value)}</span>
-        <span className="font-mono font-medium text-sm text-muted-foreground">
+        <span className="font-medium font-mono text-muted-foreground text-sm tabular-nums">
           %
         </span>
       </>
     );
   }
 
-  return <span className={VALUE_CLASS}>{number.short(value)}</span>;
+  const fitsInFull = Math.abs(value) < FULL_NUMBER_LIMIT;
+  return (
+    <span className={VALUE_CLASS}>
+      {fitsInFull ? number.format(value) : number.short(value)}
+    </span>
+  );
 }
