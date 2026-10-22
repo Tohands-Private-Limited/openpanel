@@ -1,5 +1,6 @@
-import type { IServiceEvent } from '@openpanel/db';
+import type { IServiceEvent } from '@openpanel/core';
 import type { ColumnDef } from '@tanstack/react-table';
+import { useEventDrawer } from '../use-event-drawer';
 import { ColumnCreatedAt } from '@/components/column-created-at';
 import { EventIcon } from '@/components/events/event-icon';
 import { ProjectLink } from '@/components/links';
@@ -11,6 +12,7 @@ import { pushModal } from '@/modals';
 import { getProfileName } from '@/utils/getters';
 
 export function useColumns() {
+  const { openEvent } = useEventDrawer();
   const number = useNumber();
   const columns: ColumnDef<IServiceEvent>[] = [
     {
@@ -77,10 +79,9 @@ export function useColumns() {
               <button
                 className="min-w-0 max-w-full truncate text-left font-medium hover:underline"
                 onClick={() => {
-                  pushModal('EventDetails', {
+                  openEvent({
                     id: row.original.id,
                     createdAt: row.original.createdAt,
-                    projectId: row.original.projectId,
                   });
                 }}
                 title={fullTitle}
@@ -102,7 +103,8 @@ export function useColumns() {
           return (
             <ProjectLink
               className="group row items-center gap-2 whitespace-nowrap font-medium hover:underline"
-              href={`/profiles/${encodeURIComponent(profile.id)}`}
+              params={{ profileId: profile.id }}
+              to="/profiles/$profileId"
             >
               <ProfileAvatar size="sm" {...profile} />
               {getProfileName(profile)}
@@ -114,7 +116,8 @@ export function useColumns() {
           return (
             <ProjectLink
               className="whitespace-nowrap font-medium hover:underline"
-              href={`/profiles/${encodeURIComponent(profileId)}`}
+              params={{ profileId }}
+              to="/profiles/$profileId"
             >
               Unknown
             </ProjectLink>
@@ -125,7 +128,8 @@ export function useColumns() {
           return (
             <ProjectLink
               className="whitespace-nowrap font-medium hover:underline"
-              href={`/profiles/${encodeURIComponent(deviceId)}`}
+              params={{ profileId: deviceId }}
+              to="/profiles/$profileId"
             >
               Anonymous
             </ProjectLink>
@@ -152,8 +156,9 @@ export function useColumns() {
         return (
           <ProjectLink
             className="block truncate whitespace-nowrap font-mono text-sm hover:underline"
-            href={`/profiles/${encodeURIComponent(id)}`}
+            params={{ profileId: id }}
             title={id}
+            to="/profiles/$profileId"
           >
             {id}
           </ProjectLink>
@@ -192,7 +197,8 @@ export function useColumns() {
         return (
           <ProjectLink
             className="whitespace-nowrap font-medium hover:underline"
-            href={`/sessions/${encodeURIComponent(sessionId)}`}
+            params={{ sessionId }}
+            to="/sessions/$sessionId"
           >
             {sessionId.slice(0, 6)}
           </ProjectLink>
@@ -265,7 +271,7 @@ export function useColumns() {
           <div className="flex flex-wrap gap-1">
             {groups.map((g) => (
               <span
-                className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs"
+                className="rounded bg-muted px-1.5 py-0.5 text-xs tabular-nums"
                 key={g}
               >
                 {g}

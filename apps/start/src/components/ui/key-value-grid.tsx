@@ -1,13 +1,13 @@
+import type { IServiceEvent } from '@openpanel/core';
+import { isToday } from 'date-fns';
+import { CopyIcon } from 'lucide-react';
+import { SerieIcon } from '../report-chart/common/serie-icon';
 import { fancyMinutes } from '@/hooks/use-numer-formatter';
 import { countries } from '@/translations/countries';
 import { camelCaseToWords } from '@/utils/casing';
 import { clipboard } from '@/utils/clipboard';
 import { cn } from '@/utils/cn';
 import { formatDateTime, formatTime } from '@/utils/date';
-import type { IServiceEvent } from '@openpanel/db';
-import { isToday } from 'date-fns';
-import { CopyIcon } from 'lucide-react';
-import { SerieIcon } from '../report-chart/common/serie-icon';
 
 export interface KeyValueItem {
   name: string;
@@ -28,6 +28,35 @@ interface KeyValueGridProps {
   copyable?: boolean;
 }
 
+/**
+ * The value cell truncates, so the full value is only reachable through the native
+ * tooltip and the copy button. Both need a string, and objects render as JSON here,
+ * so stringify them rather than leaving the value unreadable.
+ */
+export function toStringValue(value: unknown): string | undefined {
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return undefined;
+    }
+  }
+
+  return String(value);
+}
+
 export function KeyValueGrid({
   data,
   columns = 1,
@@ -46,12 +75,12 @@ export function KeyValueGrid({
       <div className="flex items-center gap-1">
         {splitKey.map((name, index) => (
           <span
-            key={name}
             className={
               index === splitKey.length - 1
                 ? 'text-foreground'
                 : 'text-muted-foreground'
             }
+            key={name}
           >
             {camelCaseToWords(name)}
             {index < splitKey.length - 1 && (
@@ -65,7 +94,7 @@ export function KeyValueGrid({
 
   const defaultRenderValue = (item: KeyValueItem) => {
     return (
-      <FieldValue name={item.name} value={item.value} event={item.event} />
+      <FieldValue event={item.event} name={item.name} value={item.value} />
     );
   };
 
@@ -78,66 +107,59 @@ export function KeyValueGrid({
 
   return (
     <div
-      className={cn('grid card overflow-hidden', gridCols[columns], className)}
+      className={cn('card grid overflow-hidden', gridCols[columns], className)}
     >
-      {data.map((item, index) => (
-        <div
-          key={`${item.name}-${index}`}
-          className={cn(
-            'relative flex items-center justify-between gap-4 p-4 py-3 shadow-[0_0_0_0.5px] shadow-border group',
-            onItemClick && 'cursor-pointer hover:bg-muted/50',
-            rowClassName,
-          )}
-          onClick={() => onItemClick?.(item)}
-          onKeyDown={(e) => {
-            if (onItemClick && (e.key === 'Enter' || e.key === ' ')) {
-              e.preventDefault();
-              onItemClick(item);
-            }
-          }}
-          tabIndex={onItemClick ? 0 : undefined}
-          role={onItemClick ? 'button' : undefined}
-        >
-          {copyable && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                if (typeof item.value === 'object') {
-                  try {
-                    const value = JSON.stringify(item.value);
-                    clipboard(value);
-                  }
-                  catch {
-                    clipboard(item.value);
-                  }
-                }
-                else {
-                  clipboard(item.value);
-                }
-              }}
-              type="button"
-              className="absolute left-2 top-1/2 -translate-y-1/2 -translate-x-full opacity-0 group-hover:translate-x-0 group-hover:opacity-100 transition-all duration-200 ease-out bg-background border border-border rounded p-1 shadow-sm z-10"
-            >
-              <CopyIcon className="size-3 shrink-0" />
-            </button>
-          )}
-          <div className={cn('flex-1 min-w-0 text-sm', keyClassName)}>
-            {renderKey ? renderKey(item) : defaultRenderKey(item)}
-          </div>
+      {data.map((item, index) => {
+        const stringValue = toStringValue(item.value);
+
+        return (
           <div
             className={cn(
-              'text-right text-sm font-mono truncate min-w-0 max-w-[60%]',
-              valueClassName,
+              'group relative flex items-center justify-between gap-4 p-4 py-3 shadow-[0_0_0_0.5px] shadow-border',
+              onItemClick && 'cursor-pointer hover:bg-muted/50',
+              rowClassName
             )}
-            title={typeof item.value === 'string' ? item.value : undefined}
+            key={`${item.name}-${index}`}
+            onClick={() => onItemClick?.(item)}
+            onKeyDown={(e) => {
+              if (onItemClick && (e.key === 'Enter' || e.key === ' ')) {
+                e.preventDefault();
+                onItemClick(item);
+              }
+            }}
+            role={onItemClick ? 'button' : undefined}
+            tabIndex={onItemClick ? 0 : undefined}
           >
-            {renderValue ? renderValue(item) : defaultRenderValue(item)}
+            {copyable && stringValue !== undefined && (
+              <button
+                className="absolute top-1/2 left-2 z-10 -translate-x-full -translate-y-1/2 rounded border border-border bg-background p-1 opacity-0 shadow-sm transition-all duration-200 ease-out group-hover:translate-x-0 group-hover:opacity-100"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  clipboard(stringValue);
+                }}
+                type="button"
+              >
+                <CopyIcon className="size-3 shrink-0" />
+              </button>
+            )}
+            <div className={cn('min-w-0 flex-1 text-sm', keyClassName)}>
+              {renderKey ? renderKey(item) : defaultRenderKey(item)}
+            </div>
+            <div
+              className={cn(
+                'min-w-0 max-w-[60%] truncate text-right text-sm tabular-nums',
+                valueClassName
+              )}
+              title={stringValue}
+            >
+              {renderValue ? renderValue(item) : defaultRenderValue(item)}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
 
       {data.length === 0 && (
-        <div className="text-center text-muted-foreground py-8 col-span-full">
+        <div className="col-span-full py-8 text-center text-muted-foreground">
           No data available
         </div>
       )}
@@ -166,28 +188,28 @@ export function FieldValue({
     switch (name) {
       case 'osVersion':
         return (
-          <div className="row gap-2 items-center">
+          <div className="row items-center gap-2">
             <SerieIcon name={event.os} />
             <span>{value}</span>
           </div>
         );
       case 'browserVersion':
         return (
-          <div className="row gap-2 items-center">
+          <div className="row items-center gap-2">
             <SerieIcon name={event.browser} />
             <span>{value}</span>
           </div>
         );
       case 'city':
         return (
-          <div className="row gap-2 items-center">
+          <div className="row items-center gap-2">
             <SerieIcon name={event.country} />
             <span>{value}</span>
           </div>
         );
       case 'region':
         return (
-          <div className="row gap-2 items-center">
+          <div className="row items-center gap-2">
             <SerieIcon name={event.country} />
             <span>{value}</span>
           </div>
@@ -196,7 +218,7 @@ export function FieldValue({
         return JSON.stringify(value);
       case 'country':
         return (
-          <div className="row gap-2 items-center">
+          <div className="row items-center gap-2">
             <SerieIcon name={value} />
             <span>{countries[value as keyof typeof countries] ?? value}</span>
           </div>
@@ -207,7 +229,7 @@ export function FieldValue({
       case 'model':
       case 'device':
         return (
-          <div className="row gap-2 items-center">
+          <div className="row items-center gap-2">
             <SerieIcon name={value} />
             <span>{value}</span>
           </div>

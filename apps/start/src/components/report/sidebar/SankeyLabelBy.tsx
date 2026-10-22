@@ -1,12 +1,15 @@
-import type { IChartEvent, ISankeyLabelRule } from '@openpanel/validation';
+import type {
+  IChartEvent,
+  ISankeyLabelRule,
+} from '@openpanel/core/modules/report/report.constants';
 import { PlusIcon, XIcon } from 'lucide-react';
+import { changeSankeyLabelBy } from '../reportSlice';
+import { PropertiesCombobox } from './PropertiesCombobox';
 import { Button } from '@/components/ui/button';
 import { ComboboxEvents } from '@/components/ui/combobox-events';
 import { useAppParams } from '@/hooks/use-app-params';
 import { useEventNames } from '@/hooks/use-event-names';
 import { useDispatch } from '@/redux';
-import { changeSankeyLabelBy } from '../reportSlice';
-import { PropertiesCombobox } from './PropertiesCombobox';
 
 interface SankeyLabelByProps {
   value: ISankeyLabelRule[];
@@ -14,7 +17,7 @@ interface SankeyLabelByProps {
 
 /**
  * Editor for the Sankey "Node label" rules: relabel specific events by one of
- * their event-level properties (e.g. `screen_view` → its `path`) so the flow
+ * their event-level properties (e.g. `screen_view` -> its `path`) so the flow
  * fans out into per-screen nodes. Events without a rule keep their event name.
  */
 export function SankeyLabelBy({ value }: SankeyLabelByProps) {
@@ -28,7 +31,7 @@ export function SankeyLabelBy({ value }: SankeyLabelByProps) {
 
   const updateRule = (index: number, patch: Partial<ISankeyLabelRule>) => {
     setRules(
-      value.map((rule, i) => (i === index ? { ...rule, ...patch } : rule)),
+      value.map((rule, i) => (i === index ? { ...rule, ...patch } : rule))
     );
   };
 
@@ -38,9 +41,8 @@ export function SankeyLabelBy({ value }: SankeyLabelByProps) {
 
   const addRule = () => {
     // Default new rows to `path` (the common screen_view case); the event
-    // starts empty for the user to pick. Incomplete rules are already valid
-    // (zSankeyLabelRule accepts them, buildSankeyLabelExpr skips them), so this
-    // is a UX nicety — one fewer click for the typical flow — not a bug fix.
+    // starts empty for the user to pick. Incomplete rules are valid in the
+    // schema and skipped by the query builder.
     setRules([...value, { event: '', property: 'path' }]);
   };
 

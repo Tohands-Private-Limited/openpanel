@@ -1,12 +1,15 @@
+import { useSuspenseQuery } from '@tanstack/react-query';
 import { createFileRoute } from '@tanstack/react-router';
 import { AlertCircle } from 'lucide-react';
 import { z } from 'zod';
 import { Or } from '@/components/auth/or';
+import { SignInDev } from '@/components/auth/sign-in-dev';
 import { SignInEmailForm } from '@/components/auth/sign-in-email-form';
 import { SignInGithub } from '@/components/auth/sign-in-github';
 import { SignInGoogle } from '@/components/auth/sign-in-google';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { useCookieStore } from '@/hooks/use-cookie-store';
+import { useTRPC } from '@/integrations/trpc/react';
 import { createTitle, PAGE_TITLES } from '@/utils/title';
 
 export const Route = createFileRoute('/_login/login')({
@@ -22,10 +25,20 @@ export const Route = createFileRoute('/_login/login')({
     correlationId: z.string().optional(),
     inviteId: z.string().optional(),
   }),
+  loader: async ({ context }) => {
+    await context.queryClient.ensureQueryData(
+      context.trpc.auth.providers.queryOptions()
+    );
+  },
 });
 
 function LoginPage() {
   const { error, correlationId, inviteId } = Route.useSearch();
+  const trpc = useTRPC();
+  const { data: providers } = useSuspenseQuery(
+    trpc.auth.providers.queryOptions()
+  );
+  const hasOAuthProviders = providers.google || providers.github;
   const [lastProvider] = useCookieStore<null | string>(
     'last-auth-provider',
     null
@@ -72,20 +85,37 @@ function LoginPage() {
         </Alert>
       )}
 
-      <div className="space-y-4">
-        <SignInGoogle
-          inviteId={inviteId}
-          isLastUsed={lastProvider === 'google'}
-          type="sign-in"
-        />
-        <SignInGithub
-          inviteId={inviteId}
-          isLastUsed={lastProvider === 'github'}
-          type="sign-in"
-        />
-      </div>
-      <Or />
-      <SignInEmailForm inviteId={inviteId} isLastUsed={lastProvider === 'email'} />
+      {hasOAuthProviders && (
+        <>
+          <div className="space-y-4">
+            {providers.google && (
+              <SignInGoogle
+                inviteId={inviteId}
+                isLastUsed={lastProvider === 'google'}
+                type="sign-in"
+              />
+            )}
+            {providers.github && (
+              <SignInGithub
+                inviteId={inviteId}
+                isLastUsed={lastProvider === 'github'}
+                type="sign-in"
+              />
+            )}
+          </div>
+          <Or />
+        </>
+      )}
+      <SignInEmailForm
+        inviteId={inviteId}
+        isLastUsed={lastProvider === 'email'}
+      />
+      {providers.devLogin && (
+        <>
+          <Or />
+          <SignInDev inviteId={inviteId} />
+        </>
+      )}
     </div>
   );
 }

@@ -1,7 +1,8 @@
-import type { IServiceEvent, IServiceSession } from '@openpanel/db';
-import { useSuspenseQuery, useQuery } from '@tanstack/react-query';
+import type { IServiceEvent, IServiceSession } from '@openpanel/core';
+import { useQuery, useSuspenseQuery } from '@tanstack/react-query';
 import { createFileRoute, Link } from '@tanstack/react-router';
 import { EventIcon } from '@/components/events/event-icon';
+import { useEventDrawer } from '@/components/events/use-event-drawer';
 import FullPageLoadingState from '@/components/full-page-loading-state';
 import { PageContainer } from '@/components/page-container';
 import { PageHeader } from '@/components/page-header';
@@ -139,26 +140,14 @@ function EventDistribution({ events }: { events: IServiceEvent[] }) {
 function Component() {
   const { projectId, sessionId, organizationId } = Route.useParams();
   const trpc = useTRPC();
+  const { openEvent } = useEventDrawer();
   const number = useNumber();
 
   const { data: session } = useSuspenseQuery(
     trpc.session.byId.queryOptions({ sessionId, projectId })
   );
 
-  useEntityPageContext(
-    'sessionDetail',
-    { sessionId },
-    {
-      duration: session.duration,
-      eventCount: session.eventCount,
-      screenViewCount: session.screenViewCount,
-      country: session.country,
-      device: session.device,
-      isBounce: session.isBounce,
-      entryPath: session.entryPath,
-      exitPath: session.exitPath,
-    },
-  );
+  useEntityPageContext('session', { sessionId });
 
   const { data: eventsData } = useSuspenseQuery(
     trpc.event.events.queryOptions({
@@ -236,9 +225,7 @@ function Component() {
       )}
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[340px_minmax(0,1fr)]">
-        {/* Left column */}
         <div className="col gap-6">
-          {/* Session info */}
           <Widget className="w-full">
             <WidgetHead>
               <WidgetTitle>Session info</WidgetTitle>
@@ -279,7 +266,12 @@ function Component() {
                   ? [{ name: 'utmCampaign', value: session.utmCampaign }]
                   : []),
                 ...(session.revenue > 0
-                  ? [{ name: 'revenue', value: `$${session.revenue}` }]
+                  ? [
+                      {
+                        name: 'revenue',
+                        value: number.currency(session.revenue / 100),
+                      },
+                    ]
                   : []),
                 { name: 'country', value: session.country, event: fakeEvent },
                 ...(session.city
@@ -316,7 +308,6 @@ function Component() {
             />
           </Widget>
 
-          {/* Profile card */}
           {isIdentified && profile && (
             <Widget className="w-full">
               <WidgetHead>
@@ -348,7 +339,6 @@ function Component() {
             </Widget>
           )}
 
-          {/* Group cards */}
           {sessionGroups && sessionGroups.length > 0 && (
             <Widget className="w-full">
               <WidgetHead>
@@ -357,14 +347,14 @@ function Component() {
               <WidgetBody className="p-0">
                 {sessionGroups.map((group) => (
                   <Link
-                    key={group.id}
                     className="row items-center gap-3 p-4 transition-colors hover:bg-accent"
+                    key={group.id}
                     params={{ organizationId, projectId, groupId: group.id }}
                     to="/$organizationId/$projectId/groups/$groupId"
                   >
                     <div className="col min-w-0 flex-1 gap-0.5">
                       <span className="truncate font-medium">{group.name}</span>
-                      <span className="truncate text-muted-foreground text-sm font-mono">
+                      <span className="truncate text-muted-foreground text-sm tabular-nums">
                         {group.id}
                       </span>
                     </div>
@@ -377,29 +367,29 @@ function Component() {
             </Widget>
           )}
 
-          {/* Visited pages */}
           <VisitedRoutes
             paths={events
               .filter((e) => e.name === 'screen_view' && e.path)
               .map((e) => e.path)}
           />
 
-          {/* Event distribution */}
           <EventDistribution events={events} />
         </div>
 
-        {/* Right column */}
         <div className="col gap-6">
-          {/* Events list */}
           <Widget className="w-full">
             <WidgetHead>
               <WidgetTitle>Events</WidgetTitle>
             </WidgetHead>
             <div className="divide-y">
               {events.map((event) => (
-                <div
-                  className="row items-center gap-3 px-4 py-2"
+                <button
+                  className="row w-full items-center gap-3 px-4 py-2 text-left transition-colors hover:bg-def-100"
                   key={event.id}
+                  onClick={() =>
+                    openEvent({ id: event.id, createdAt: event.createdAt })
+                  }
+                  type="button"
                 >
                   <EventIcon meta={event.meta} name={event.name} size="sm" />
                   <div className="col min-w-0 flex-1">
@@ -412,7 +402,7 @@ function Component() {
                   <span className="shrink-0 text-muted-foreground text-xs tabular-nums">
                     {formatDateTime(event.createdAt)}
                   </span>
-                </div>
+                </button>
               ))}
               {events.length === 0 && (
                 <div className="py-8 text-center text-muted-foreground text-sm">

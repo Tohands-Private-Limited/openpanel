@@ -1,10 +1,16 @@
-import { getDefaultIntervalByDates, timeWindows } from '@openpanel/constants';
-import type { IChartRange, IInterval } from '@openpanel/validation';
+import type {
+  IChartRange,
+  IInterval,
+} from '@openpanel/core/modules/report/report.constants';
+import {
+  getDefaultIntervalByDates,
+  timeWindows,
+} from '@openpanel/core/modules/report/report.constants';
 import { bind } from 'bind-event-listener';
 import { addDays, endOfDay, format, startOfDay, subDays } from 'date-fns';
 import { CalendarIcon } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Button } from '@/components/ui/button';
+import { Button, type ButtonProps } from '@/components/ui/button';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -29,6 +35,8 @@ interface Props {
   endDate: string | null;
   startDate: string | null;
   className?: string;
+  variant?: ButtonProps['variant'];
+  size?: ButtonProps['size'];
 }
 export function TimeWindowPicker({
   value,
@@ -39,6 +47,8 @@ export function TimeWindowPicker({
   onEndDateChange,
   onIntervalChange,
   className,
+  variant = 'outline',
+  size,
 }: Props) {
   const isDateRangerPickerOpen = useRef(false);
   useOnPushModal('DateRangerPicker', (open) => {
@@ -116,7 +126,8 @@ export function TimeWindowPicker({
         <Button
           className={cn('justify-start', className)}
           icon={CalendarIcon}
-          variant="outline"
+          size={size}
+          variant={variant}
         >
           {timeWindow?.label}
         </Button>

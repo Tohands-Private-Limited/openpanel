@@ -1,8 +1,4 @@
-import { useAppParams } from '@/hooks/use-app-params';
-import { useTRPC } from '@/integrations/trpc/react';
-import { pushModal, showConfirm } from '@/modals';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-
 import { AnimatePresence, motion } from 'framer-motion';
 import { BoxSelectIcon } from 'lucide-react';
 import { useMemo } from 'react';
@@ -15,14 +11,17 @@ import {
   IntegrationCardSkeleton,
 } from './integration-card';
 import { INTEGRATIONS } from './integrations';
+import { useAppParams } from '@/hooks/use-app-params';
+import { useTRPC } from '@/integrations/trpc/react';
+import { pushModal, showConfirm } from '@/modals';
 
 export function ActiveIntegrations() {
-  const { organizationId } = useAppParams();
+  const { projectId } = useAppParams();
   const trpc = useTRPC();
   const query = useQuery(
     trpc.integration.list.queryOptions({
-      organizationId: organizationId!,
-    }),
+      projectId: projectId!,
+    })
   );
   const client = useQueryClient();
   const deletion = useMutation(
@@ -30,18 +29,18 @@ export function ActiveIntegrations() {
       onSuccess() {
         client.refetchQueries(
           trpc.integration.list.queryFilter({
-            organizationId,
-          }),
+            projectId,
+          })
         );
       },
-    }),
+    })
   );
 
   const data = useMemo(() => {
     return (query.data || [])
       .map((item) => {
         const integration = INTEGRATIONS.find(
-          (integration) => integration.type === item.config.type,
+          (integration) => integration.type === item.config.type
         )!;
         return {
           ...item,
@@ -54,7 +53,7 @@ export function ActiveIntegrations() {
   const isLoading = query.isLoading;
 
   return (
-    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 auto-rows-auto">
+    <div className="grid auto-rows-auto grid-cols-1 gap-4 md:grid-cols-2">
       {isLoading && (
         <>
           <IntegrationCardSkeleton />
@@ -64,13 +63,13 @@ export function ActiveIntegrations() {
       )}
       {!isLoading && data.length === 0 && (
         <IntegrationCard
+          description="Integrations allow you to connect your systems to OpenPanel. You can add them in the available integrations section."
           icon={
             <IntegrationCardLogo className="bg-def-200 text-foreground">
               <BoxSelectIcon className="size-10" strokeWidth={1} />
             </IntegrationCardLogo>
           }
           name="No integrations yet"
-          description="Integrations allow you to connect your systems to OpenPanel. You can add them in the available integrations section."
         />
       )}
       <AnimatePresence mode="popLayout">
@@ -78,11 +77,10 @@ export function ActiveIntegrations() {
           return (
             <motion.div key={item.id} layout="position">
               <IntegrationCard {...item.integration} name={item.name}>
-                <IntegrationCardFooter className="row justify-between items-center">
+                <IntegrationCardFooter className="row items-center justify-between">
                   <PingBadge>Connected</PingBadge>
                   <div className="row gap-2">
                     <Button
-                      variant="ghost"
                       className="text-destructive"
                       onClick={() => {
                         showConfirm({
@@ -95,17 +93,18 @@ export function ActiveIntegrations() {
                           },
                         });
                       }}
+                      variant="ghost"
                     >
                       Delete
                     </Button>
                     <Button
-                      variant="ghost"
                       onClick={() => {
                         pushModal('AddIntegration', {
                           id: item.id,
                           type: item.config.type,
                         });
                       }}
+                      variant="ghost"
                     >
                       Edit
                     </Button>

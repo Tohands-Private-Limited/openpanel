@@ -2,13 +2,13 @@ import {
   createRootRouteWithContext,
   HeadContent,
   Scripts,
+  useRouteContext,
 } from '@tanstack/react-router';
+import { useEffect } from 'react';
 
 import 'flag-icons/css/flag-icons.min.css';
 import 'katex/dist/katex.min.css';
-import 'react-grid-layout/css/styles.css';
-import 'react-resizable/css/styles.css';
-import type { AppRouter } from '@openpanel/trpc';
+import type { AppRouter } from '@openpanel/core';
 import type { QueryClient } from '@tanstack/react-query';
 import { TRPCClientError } from '@trpc/client';
 import type { TRPCOptionsProxy } from '@trpc/tanstack-react-query';
@@ -93,6 +93,26 @@ export const Route = createRootRouteWithContext<MyRouterContext>()({
   pendingComponent: FullPageLoadingState,
 });
 
+// Tie dashboard events to the signed-in user so activation funnels
+// (signup -> project created -> first event -> report) can be measured.
+function OpIdentify() {
+  const context = useRouteContext({ strict: false });
+  const user = context.session?.user;
+
+  useEffect(() => {
+    if (user?.id) {
+      op.identify({
+        profileId: user.id,
+        email: user.email,
+        firstName: user.firstName ?? undefined,
+        lastName: user.lastName ?? undefined,
+      });
+    }
+  }, [user?.id, user?.email, user?.firstName, user?.lastName]);
+
+  return null;
+}
+
 function RootDocument({ children }: { children: React.ReactNode }) {
   useSessionExtension();
 
@@ -101,7 +121,8 @@ function RootDocument({ children }: { children: React.ReactNode }) {
       <head>
         <HeadContent />
       </head>
-      <body className="grainy min-h-screen bg-def-100 font-sans text-base leading-normal antialiased">
+      <body className="grainy min-h-screen bg-def-100 font-sans text-sm antialiased">
+        <OpIdentify />
         <Providers>{children}</Providers>
         <ThemeScriptOnce />
         <Scripts />
