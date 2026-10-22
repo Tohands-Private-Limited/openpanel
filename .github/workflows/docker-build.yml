@@ -3,10 +3,11 @@ name: Docker Build and Push
 on:
   workflow_dispatch:
   push:
-    # Branches only: the self-hosting tag has its own workflow, and the v* tags
-    # this workflow pushes must not start another build.
+    # ToHands fork: only the promotion branches build images (FORK-PATCHES.md).
     branches:
-      - "**"
+      - develop
+      - staging
+      - main
     paths-ignore:
       # README and docs
       - "**/README*"
@@ -15,6 +16,10 @@ on:
       - "**/docs/**"
       - "**/CHANGELOG*"
       - "**/LICENSE*"
+      - "**/*.test.*"
+      - "**/*.spec.*"
+      - "**/__tests__/**"
+      - "**/tests/**"
       # SDKs (published separately)
       - "packages/sdks/**"
       # Public app (docs/marketing, not part of Docker deploy)
@@ -29,7 +34,9 @@ on:
       - "**/.prettierignore"
 
 env:
-  repo_owner: "openpanel-dev"
+  # Pushes to ghcr.io/<repo_owner>/openpanel-{api,dashboard}.
+  # Lowercase — GHCR image paths are case-normalised.
+  repo_owner: "tohands-private-limited"
 
 jobs:
   lint-and-test:
@@ -136,35 +143,11 @@ jobs:
       - name: Run tests
         run: bun run test
 
-      # The self-hosting CLI keeps its own lockfile (it ships as a binary, not
-      # as a workspace package), so it installs and tests on its own.
-      - name: Test the self-hosting CLI
-        working-directory: self-hosting/cli
-        run: |
-          bun install --frozen-lockfile
-          bun test
-
-  # Debounce for main: a push within a minute of the previous one cancels its
-  # wait, so a burst of merges is built and versioned once, as its newest
-  # commit. `[release now]` in the pushed commit, or a manual run, skips the wait.
-  settle:
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    concurrency:
-      group: main-settle
-      cancel-in-progress: true
-    steps:
-      - name: Wait for a quiet minute
-        if: github.event_name == 'push' && !contains(github.event.head_commit.message, '[release now]')
-        run: sleep 60
-
   build-api:
     permissions:
       packages: write
       contents: read
-    needs: [lint-and-test, settle]
-    # settle is skipped on other branches; a cancelled settle (debounced) stops the run.
-    if: ${{ !cancelled() && needs.lint-and-test.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.settle.result) }}
+    needs: lint-and-test
     strategy:
       fail-fast: false
       matrix:
@@ -191,7 +174,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.TOHANDS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Build and push by digest
         id: build
@@ -202,7 +185,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           cache-from: type=gha,scope=api-${{ env.PLATFORM_PAIR }}
           cache-to: type=gha,mode=max,scope=api-${{ env.PLATFORM_PAIR }}
-          outputs: type=image,name=ghcr.io/${{ env.repo_owner }}/api,push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=ghcr.io/${{ env.repo_owner }}/openpanel-api,push-by-digest=true,name-canonical=true,push=true
           build-args: |
             DATABASE_URL=postgresql://dummy:dummy@localhost:5432/dummy
 
@@ -227,7 +210,6 @@ jobs:
       packages: read
       contents: read
     needs: [build-api, build-dashboard]
-    # Explicit, because a skipped settle earlier in the chain would otherwise skip this.
     if: ${{ !cancelled() && needs.build-api.result == 'success' && needs.build-dashboard.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
@@ -239,7 +221,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.TOHANDS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       # build-* pushed by digest but has not tagged anything yet, so pull the
       # exact amd64 digests this run produced.
@@ -259,7 +241,7 @@ jobs:
               echo "::error::no digest artifact for $app"
               exit 1
             fi
-            image="ghcr.io/${{ env.repo_owner }}/${app}@sha256:${digest}"
+            image="ghcr.io/${{ env.repo_owner }}/openpanel-${app}@sha256:${digest}"
             echo "$app -> $image"
             echo "OP_$(echo "$app" | tr '[:lower:]' '[:upper:]')_IMAGE=$image" >> "$GITHUB_ENV"
           done
@@ -292,9 +274,15 @@ jobs:
       - name: Generate tags
         id: tags
         run: |
-          BRANCH_NAME=$(echo "${{ github.ref_name }}" | sed 's/\//-/g')
+          TARGET_BRANCH="${{ github.ref_name }}"
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-4)
-          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          case "$TARGET_BRANCH" in
+            develop) ENV_TAG="dev-latest" ;;
+            staging) ENV_TAG="stg-latest" ;;
+            main)    ENV_TAG="latest" ;;
+            *)       ENV_TAG=$(echo "$TARGET_BRANCH" | sed 's/\//-/g') ;;
+          esac
+          echo "env_tag=$ENV_TAG" >> $GITHUB_OUTPUT
           echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
 
       - name: Set up Docker Buildx
@@ -305,21 +293,23 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.TOHANDS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Create manifest list and push
         working-directory: /tmp/digests
         run: |
-          docker buildx imagetools create \
-            -t ghcr.io/${{ env.repo_owner }}/api:${{ steps.tags.outputs.branch_name }}-${{ steps.tags.outputs.short_sha }} \
-            $(printf 'ghcr.io/${{ env.repo_owner }}/api@sha256:%s ' *)
+          TAGS=(
+            -t ghcr.io/${{ env.repo_owner }}/openpanel-api:${{ steps.tags.outputs.env_tag }}
+            -t ghcr.io/${{ env.repo_owner }}/openpanel-api:${{ steps.tags.outputs.env_tag }}-${{ steps.tags.outputs.short_sha }}
+          )
+          docker buildx imagetools create "${TAGS[@]}" \
+            $(printf 'ghcr.io/${{ env.repo_owner }}/openpanel-api@sha256:%s ' *)
 
   build-dashboard:
     permissions:
       packages: write
       contents: read
-    needs: [lint-and-test, settle]
-    if: ${{ !cancelled() && needs.lint-and-test.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.settle.result) }}
+    needs: lint-and-test
     strategy:
       fail-fast: false
       matrix:
@@ -346,7 +336,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.TOHANDS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Build and push by digest
         id: build
@@ -357,7 +347,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           cache-from: type=gha,scope=dashboard-${{ env.PLATFORM_PAIR }}
           cache-to: type=gha,mode=max,scope=dashboard-${{ env.PLATFORM_PAIR }}
-          outputs: type=image,name=ghcr.io/${{ env.repo_owner }}/dashboard,push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=ghcr.io/${{ env.repo_owner }}/openpanel-dashboard,push-by-digest=true,name-canonical=true,push=true
           build-args: |
             NO_CLOUDFLARE=1
 
@@ -396,9 +386,15 @@ jobs:
       - name: Generate tags
         id: tags
         run: |
-          BRANCH_NAME=$(echo "${{ github.ref_name }}" | sed 's/\//-/g')
+          TARGET_BRANCH="${{ github.ref_name }}"
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-4)
-          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          case "$TARGET_BRANCH" in
+            develop) ENV_TAG="dev-latest" ;;
+            staging) ENV_TAG="stg-latest" ;;
+            main)    ENV_TAG="latest" ;;
+            *)       ENV_TAG=$(echo "$TARGET_BRANCH" | sed 's/\//-/g') ;;
+          esac
+          echo "env_tag=$ENV_TAG" >> $GITHUB_OUTPUT
           echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
 
       - name: Set up Docker Buildx
@@ -409,131 +405,15 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.TOHANDS_GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Create manifest list and push
         working-directory: /tmp/digests
         run: |
-          docker buildx imagetools create \
-            -t ghcr.io/${{ env.repo_owner }}/dashboard:${{ steps.tags.outputs.branch_name }}-${{ steps.tags.outputs.short_sha }} \
-            $(printf 'ghcr.io/${{ env.repo_owner }}/dashboard@sha256:%s ' *)
+          TAGS=(
+            -t ghcr.io/${{ env.repo_owner }}/openpanel-dashboard:${{ steps.tags.outputs.env_tag }}
+            -t ghcr.io/${{ env.repo_owner }}/openpanel-dashboard:${{ steps.tags.outputs.env_tag }}-${{ steps.tags.outputs.short_sha }}
+          )
+          docker buildx imagetools create "${TAGS[@]}" \
+            $(printf 'ghcr.io/${{ env.repo_owner }}/openpanel-dashboard@sha256:%s ' *)
 
-  # Every build on main gets the next version: the git tag vX.Y.Z and the image
-  # tags X.Y.Z, X.Y and X, taken from this run's own digests. One run at a time,
-  # so two versions are never computed from the same last tag.
-  version:
-    if: ${{ github.ref == 'refs/heads/main' && !cancelled() && needs.merge-api.result == 'success' && needs.merge-dashboard.result == 'success' }}
-    needs: [merge-api, merge-dashboard]
-    runs-on: ubuntu-latest
-    concurrency:
-      group: main-version
-      cancel-in-progress: false
-    permissions:
-      contents: write
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: ".bun-version"
-
-      - run: bun install --frozen-lockfile --filter @openpanel/release
-
-      - name: Decide the version
-        id: next
-        run: bun tooling/release/src/next-version.ts "$GITHUB_SHA"
-
-      - name: Download digests
-        if: steps.next.outputs.skip != 'true'
-        uses: actions/download-artifact@v4
-        with:
-          path: /tmp/digests
-          pattern: digests-*
-
-      - uses: docker/setup-buildx-action@v3
-        if: steps.next.outputs.skip != 'true'
-
-      - uses: docker/login-action@v3
-        if: steps.next.outputs.skip != 'true'
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Tag the images
-        if: steps.next.outputs.skip != 'true'
-        env:
-          VERSION: ${{ steps.next.outputs.version }}
-          MINOR: ${{ steps.next.outputs.minor }}
-          MAJOR: ${{ steps.next.outputs.major }}
-        run: |
-          set -euo pipefail
-          for app in api dashboard; do
-            image="ghcr.io/$repo_owner/$app"
-            # One file per platform, named after that platform's digest.
-            sources=()
-            for file in /tmp/digests/digests-"$app"-*/*; do
-              sources+=("$image@sha256:$(basename "$file")")
-            done
-            docker buildx imagetools create -t "$image:$VERSION" -t "$image:$MINOR" -t "$image:$MAJOR" "${sources[@]}"
-            echo "$image: $VERSION, $MINOR, $MAJOR"
-          done
-
-      # Pushed with GITHUB_TOKEN, which starts no workflow of its own.
-      - name: Tag the commit
-        if: steps.next.outputs.skip != 'true' && steps.next.outputs.is_new == 'true'
-        env:
-          VERSION: ${{ steps.next.outputs.version }}
-        run: |
-          git tag "v$VERSION" "$GITHUB_SHA"
-          git push origin "v$VERSION"
-
-      # Linux only: self-hosting runs on Linux servers, and bun cross-compiles
-      # both architectures here in seconds.
-      - name: Build the CLI
-        if: steps.next.outputs.skip != 'true'
-        working-directory: self-hosting/cli
-        env:
-          VERSION: ${{ steps.next.outputs.version }}
-        run: |
-          set -euo pipefail
-          bun install --frozen-lockfile
-          for target in linux-x64 linux-arm64; do
-            bun build --compile --target="bun-$target" --define "OPENPANEL_RELEASE_VERSION=\"$VERSION\"" src/main.ts --outfile "dist/openpanel-$target"
-          done
-          test "$(./dist/openpanel-linux-x64 --version)" = "$VERSION"
-          (cd dist && sha256sum openpanel-* > checksums.txt)
-
-      # Supporters install and self-update from these; public installs ignore
-      # pre-releases until the self-hosting tag promotes one.
-      - name: Publish the build as a pre-release
-        if: steps.next.outputs.skip != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.next.outputs.version }}
-        run: |
-          set -euo pipefail
-          files=(self-hosting/cli/dist/openpanel-* self-hosting/cli/dist/checksums.txt)
-          if gh release view "v$VERSION" >/dev/null 2>&1; then
-            gh release upload "v$VERSION" "${files[@]}" --clobber
-          else
-            gh release create "v$VERSION" "${files[@]}" --verify-tag --prerelease \
-              --title "OpenPanel $VERSION (build)" \
-              --notes "Build of main at $GITHUB_SHA. Supporters get it with \`openpanel upgrade --supporter\`; public releases are published from the self-hosting tag."
-          fi
-
-      # One pre-release per build adds up; keep the newest ten. Tags stay, and a
-      # public release is never a pre-release, so it is never touched.
-      - name: Remove old pre-releases
-        if: steps.next.outputs.skip != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          KEEP: "10"
-        run: |
-          gh release list --limit 200 --json tagName,isPrerelease,createdAt \
-            --jq "[.[] | select(.isPrerelease)] | sort_by(.createdAt) | reverse | .[$KEEP:] | .[].tagName" \
-            | while read -r tag; do gh release delete "$tag" --yes; done
