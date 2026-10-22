@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { createClient } from '@openpanel/db/src/clickhouse/client';
+import { bootstrapTestDatabases } from '../../../../../test/bootstrap-databases';
 import { TEST_CLICKHOUSE_URL } from '../../../../../test/databases';
 import { buildEvent } from '../../../../../test/fixtures';
 import { testServiceDeps } from '../../../test/service-deps';
@@ -234,6 +235,8 @@ describe('zSankeyOptions labelBy', () => {
 
 describe('getSankey with node label rules', () => {
   beforeAll(async () => {
+    // The file may be the first to touch ClickHouse in its shard.
+    await bootstrapTestDatabases();
     deps = await testServiceDeps();
     await withClient(async (client) => {
       await client.command({

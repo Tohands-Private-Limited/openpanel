@@ -16,6 +16,7 @@
 
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
 import type { SqlFragment } from '@openpanel/db/src/clickhouse/sql';
+import { bootstrapTestDatabases } from '../../../../../../test/bootstrap-databases';
 import type {
   IChartBreakdown,
   IReportInput,
@@ -157,6 +158,9 @@ const chartText = async (breakdowns: IChartBreakdown[]) =>
   render(await chartStatement({ breakdowns })).text;
 
 beforeAll(async () => {
+  // FORK (ToHands): the file may be the first to touch ClickHouse in its
+  // shard; the fork's extra test files changed how the shards split.
+  await bootstrapTestDatabases();
   ({ ch } = await import('@openpanel/db/src/clickhouse/client'));
   ({ buildFunnelBase } = await import('../funnel.service'));
   ({ funnelChartQuery, funnelProfilesQuery, funnelStepConditions } =
