@@ -153,19 +153,35 @@ function makeDeps() {
   const enqueueSessionEnd = mock<IncomingEventDeps['enqueueSessionEnd']>(
     async () => undefined
   );
+  const claimSessionStart = mock<
+    IncomingEventDeps['historicalSessionStart']['claim']
+  >(async () => true);
+  const releaseSessionStart = mock<
+    IncomingEventDeps['historicalSessionStart']['release']
+  >(async () => undefined);
+  const sessionStarted = mock<IncomingEventDeps['metrics']['sessionStarted']>(
+    () => undefined
+  );
+  const getCachedProject = mock<IncomingEventDeps['projects']['getCached']>(
+    async () => ({ firstEventAt: new Date(), filters: [] })
+  );
   const deps: IncomingEventDeps = {
     logger: noopLogger,
     sessions: { getExistingSession, ingest },
     createEvent,
     checkNotificationRulesForEvent: mock(async () => true),
     projects: {
-      getCached: mock(async () => ({ firstEventAt: new Date(), filters: [] })),
+      getCached: getCachedProject,
       markFirstEvent: mock(async () => undefined),
     },
     enqueueSessionEnd,
     metrics: {
-      sessionStarted: mock(() => undefined),
+      sessionStarted,
       sessionEndEnqueued: mock(() => undefined),
+    },
+    historicalSessionStart: {
+      claim: claimSessionStart,
+      release: releaseSessionStart,
     },
   };
   return {
@@ -174,6 +190,10 @@ function makeDeps() {
     getExistingSession,
     ingest,
     enqueueSessionEnd,
+    claimSessionStart,
+    releaseSessionStart,
+    sessionStarted,
+    getCachedProject,
   };
 }
 
@@ -559,5 +579,172 @@ describe('incomingEvent', () => {
     );
     expect(sessionStartCalls).toHaveLength(1);
     expect(enqueueSessionEnd).not.toHaveBeenCalled();
+  });
+});
+
+// FORK (ToHands): historical / offline-uploaded events reconstruct their own
+// session instead of riding the live one. See FORK-PATCHES.md.
+describe('incomingEvent — historical session reconstruction', () => {
+  const pastTimestamp = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  const historicalSessionId = 'bucketed-session-id';
+
+  function historicalJob(
+    overrides: Partial<IncomingEventPayload> = {}
+  ): IncomingEventPayload {
+    return buildJobData({
+      id: producedEventId,
+      sessionId: historicalSessionId,
+      event: {
+        name: 'screen_view',
+        timestamp: pastTimestamp.toISOString(),
+        isTimestampFromThePast: true,
+        properties: { __path: 'https://example.com/offline' },
+      },
+      ...overrides,
+    });
+  }
+
+  test('emits one session_start before the event and never touches live session state', async () => {
+    const { deps, createEvent, ingest, enqueueSessionEnd, claimSessionStart } =
+      ctx;
+
+    await incomingEvent(historicalJob(), deps);
+
+    expect(ingest).not.toHaveBeenCalled();
+    expect(enqueueSessionEnd).not.toHaveBeenCalled();
+    expect(claimSessionStart).toHaveBeenCalledWith(
+      projectId,
+      historicalSessionId
+    );
+    const [sessionStart, event] = createdEvents(createEvent);
+    expect(sessionStart).toMatchObject({
+      name: 'session_start',
+      sessionId: historicalSessionId,
+      deviceId,
+    });
+    expect(sessionStart!.id).toBeUndefined();
+    expect((sessionStart!.createdAt as Date).getTime()).toBe(
+      pastTimestamp.getTime() - 100
+    );
+    expect(event).toMatchObject({
+      name: 'screen_view',
+      id: producedEventId,
+      sessionId: historicalSessionId,
+      createdAt: pastTimestamp,
+    });
+    expect(ctx.sessionStarted).toHaveBeenCalledWith('historical');
+  });
+
+  test('skips session_start when another event already claimed the bucket', async () => {
+    const { deps, createEvent, claimSessionStart } = ctx;
+    claimSessionStart.mockResolvedValueOnce(false);
+
+    await incomingEvent(historicalJob(), deps);
+
+    const calls = createdEvents(createEvent);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.name).toBe('screen_view');
+  });
+
+  test('releases the claim and rethrows when session_start cannot be written, so a redelivery retries it', async () => {
+    const { deps, createEvent, releaseSessionStart } = ctx;
+    createEvent.mockRejectedValueOnce(new Error('buffer down'));
+
+    await expect(incomingEvent(historicalJob(), deps)).rejects.toThrow(
+      'buffer down'
+    );
+
+    expect(releaseSessionStart).toHaveBeenCalledWith(
+      projectId,
+      historicalSessionId
+    );
+    expect(createdEvents(createEvent)).toHaveLength(1);
+  });
+
+  test('does not claim a session for an event the project filters out', async () => {
+    const { deps, createEvent, claimSessionStart, getCachedProject } = ctx;
+    getCachedProject.mockResolvedValue({
+      firstEventAt: new Date(),
+      filters: [
+        {
+          type: 'event',
+          id: 'f1',
+          name: 'screen_view',
+          filters: [],
+        } as never,
+      ],
+    });
+
+    await incomingEvent(historicalJob(), deps);
+
+    expect(claimSessionStart).not.toHaveBeenCalled();
+    expect(createEvent).not.toHaveBeenCalled();
+  });
+
+  test('a past server event keeps the producer ids instead of joining the profile session', async () => {
+    const { deps, createEvent, getExistingSession, claimSessionStart } = ctx;
+
+    await incomingEvent(
+      historicalJob({
+        uaInfo: uaInfoServer,
+        event: {
+          name: 'server_event',
+          timestamp: pastTimestamp.toISOString(),
+          isTimestampFromThePast: true,
+          profileId: 'profile-123',
+        },
+      }),
+      deps
+    );
+
+    expect(getExistingSession).not.toHaveBeenCalled();
+    expect(claimSessionStart).not.toHaveBeenCalled();
+    expect(createdEvents(createEvent)).toHaveLength(1);
+    expect(createdEvents(createEvent)[0]).toMatchObject({
+      name: 'server_event',
+      deviceId,
+      sessionId: historicalSessionId,
+    });
+  });
+
+  test("a server event with no session keeps the event's own referrer", async () => {
+    const { deps, createEvent, getExistingSession } = ctx;
+    getExistingSession.mockResolvedValueOnce(null);
+
+    await incomingEvent(
+      buildJobData({
+        uaInfo: uaInfoServer,
+        event: {
+          name: 'server_event',
+          timestamp: new Date().toISOString(),
+          isTimestampFromThePast: false,
+          profileId: 'profile-123',
+          properties: { __referrer: 'https://www.google.com/search?q=x' },
+        },
+      }),
+      deps
+    );
+
+    expect(createdEvents(createEvent)[0]).toMatchObject({
+      referrer: 'https://www.google.com/search?q=x',
+      referrerName: 'Google',
+      referrerType: 'search',
+    });
+  });
+
+  test('stamps __syncedAt with the processing time on every event', async () => {
+    const { deps, createEvent, ingest } = ctx;
+    ingest.mockResolvedValueOnce({ kind: 'extend', current: makeSession() });
+    const before = Date.now();
+
+    await incomingEvent(buildJobData(), deps);
+
+    const properties = createdEvents(createEvent)[0]!.properties as Record<
+      string,
+      unknown
+    >;
+    const syncedAt = Date.parse(properties.__syncedAt as string);
+    expect(syncedAt).toBeGreaterThanOrEqual(before);
+    expect(syncedAt).toBeLessThanOrEqual(Date.now());
   });
 });

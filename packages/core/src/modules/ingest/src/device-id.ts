@@ -39,6 +39,7 @@ export async function getDeviceId({
   salts,
   overrideDeviceId,
   eventTimeMs,
+  isTimestampFromThePast,
   sessionBuffer,
   sessionTimeoutMs,
   logger,
@@ -51,6 +52,14 @@ export async function getDeviceId({
   /** Event timestamp (ms). Used to decide whether an existing session is
    *  still within its idle window. Defaults to `Date.now()`. */
   eventTimeMs?: number;
+  /**
+   * FORK: the event is older than the 15-min cutoff (an offline / late
+   * upload). It skips the live-session lookup — `withinIdleWindow` is true for
+   * any past timestamp, so a days-old backfill would otherwise join the
+   * device's current session — and gets the deterministic bucket id the
+   * worker reconstructs its session from.
+   */
+  isTimestampFromThePast?: boolean;
   sessionBuffer: SessionBufferReader;
   /** The idle window, resolved from config by the caller. */
   sessionTimeoutMs: number;
@@ -63,6 +72,7 @@ export async function getDeviceId({
       projectId,
       deviceIds: [overrideDeviceId],
       eventTimeMs: eventTimeMs ?? Date.now(),
+      isTimestampFromThePast,
       sessionBuffer,
       sessionTimeoutMs,
       logger,
@@ -90,6 +100,7 @@ export async function getDeviceId({
     projectId,
     deviceIds: [currentDeviceId, previousDeviceId],
     eventTimeMs: eventTimeMs ?? Date.now(),
+    isTimestampFromThePast,
     sessionBuffer,
     sessionTimeoutMs,
     logger,
@@ -119,6 +130,7 @@ async function getInfoFromSession({
   projectId,
   deviceIds,
   eventTimeMs,
+  isTimestampFromThePast,
   sessionBuffer,
   sessionTimeoutMs,
   logger,
@@ -128,6 +140,7 @@ async function getInfoFromSession({
    *  windows, or just [override]). Deduped; the first is canonical. */
   deviceIds: string[];
   eventTimeMs: number;
+  isTimestampFromThePast?: boolean;
   sessionBuffer: SessionBufferReader;
   sessionTimeoutMs: number;
   logger: SessionResolutionLogger;
@@ -139,10 +152,9 @@ async function getInfoFromSession({
     // Reading the live blob is the source of truth for an active session — it's
     // what keeps a visit on one id across page reloads and salt rotation. Don't
     // drop this read to "save" a lookup or sessions split at the bucket boundary.
-    const sessions = await sessionBuffer.getExistingSessions(
-      projectId,
-      candidates
-    );
+    const sessions = isTimestampFromThePast
+      ? []
+      : await sessionBuffer.getExistingSessions(projectId, candidates);
 
     for (const [index, session] of sessions.entries()) {
       if (session && withinIdleWindow(session, eventTimeMs, sessionTimeoutMs)) {

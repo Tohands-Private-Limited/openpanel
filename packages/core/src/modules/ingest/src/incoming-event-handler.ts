@@ -8,7 +8,10 @@
 
 import { getTime, isSameDomain, parsePath } from '@openpanel/shared';
 import { anyPass, isEmpty, isNil, mergeDeepRight, omit, reject } from 'ramda';
-import type { SessionIngestResult } from '../../../buffers/session-buffer';
+import {
+  resolveSessionTimeoutMs,
+  type SessionIngestResult,
+} from '../../../buffers/session-buffer';
 import type { Ctx } from '../../../context';
 import type { Logger } from '../../../logger';
 import {
@@ -27,6 +30,10 @@ import { getProjectByIdCached } from '../../project/project.service';
 import type { IClickhouseSession } from '../../session/session.service';
 import { sessionEndsEnqueued } from '../../session/src/session.metrics';
 import type { EnqueueSessionEndInput } from '../../session/src/session-end';
+import {
+  createHistoricalSessionStartLock,
+  type HistoricalSessionStartLock,
+} from './historical-session';
 import type { IncomingEventPayload } from './incoming-event';
 import { sessionsStarted } from './ingest.metrics';
 
@@ -87,7 +94,7 @@ export interface IncomingEventSessions {
 }
 
 export interface IncomingEventMetrics {
-  sessionStarted(kind: 'new' | 'boundary'): void;
+  sessionStarted(kind: 'new' | 'boundary' | 'historical'): void;
   sessionEndEnqueued(source: 'boundary'): void;
 }
 
@@ -109,6 +116,8 @@ export interface IncomingEventDeps {
   };
   enqueueSessionEnd(input: EnqueueSessionEndInput): Promise<unknown>;
   metrics: IncomingEventMetrics;
+  /** FORK: dedups the reconstructed session_start of historical events. */
+  historicalSessionStart: HistoricalSessionStartLock;
 }
 
 /**
@@ -160,6 +169,9 @@ export function createIncomingEventDeps(
       sessionStarted: (kind) => sessionsStarted.inc({ kind }),
       sessionEndEnqueued: (source) => sessionEndsEnqueued.inc({ source }),
     },
+    historicalSessionStart: createHistoricalSessionStartLock(
+      resolveSessionTimeoutMs(ctx.config)
+    ),
   };
 }
 
@@ -241,6 +253,50 @@ const parseRevenue = (revenue: unknown): number | undefined => {
   return undefined;
 };
 
+/**
+ * FORK: a non-server historical event (offline / late upload) reconstructs its
+ * session: one session_start per `(project, sessionId)` bucket, and live
+ * session state is never touched (no `sessions.ingest`, no session_end), so a
+ * backfill cannot extend or close the user's current session.
+ */
+async function ingestHistoricalEvent(
+  event: IServiceCreateEventPayloadWithId,
+  logger: Logger,
+  deps: IncomingEventDeps
+) {
+  const { projectId, sessionId } = event;
+  if (await deps.historicalSessionStart.claim(projectId, sessionId)) {
+    try {
+      // No `id`: session_start is a derived row (see the live path below).
+      await createEventAndNotify(
+        {
+          ...event,
+          id: undefined,
+          name: 'session_start',
+          createdAt: new Date(
+            getTime(event.createdAt) - SESSION_START_OFFSET_MS
+          ),
+        },
+        logger,
+        projectId,
+        deps
+      );
+      deps.metrics.sessionStarted('historical');
+    } catch (error) {
+      // Free the claim so a Kafka redelivery of this message emits it again.
+      await deps.historicalSessionStart
+        .release(projectId, sessionId)
+        .catch(() => null);
+      logger.error(
+        { err: error, event },
+        'Error creating historical session start event'
+      );
+      throw error;
+    }
+  }
+  return createEventAndNotify(event, logger, projectId, deps);
+}
+
 export async function incomingEvent(
   jobPayload: IncomingEventPayload,
   deps: IncomingEventDeps,
@@ -304,6 +360,9 @@ async function ingestIncomingEvent(
     ...properties,
     __hash: hash,
     __query: query,
+    // FORK: when the pipeline processed the event, next to its own (possibly
+    // days-old) timestamp — lets offline uploads be told apart from live ones.
+    __syncedAt: new Date().toISOString(),
   };
   const sdkName = headers['openpanel-sdk-name'];
   const sdkVersion = headers['openpanel-sdk-version'];
@@ -343,10 +402,10 @@ async function ingestIncomingEvent(
         : undefined,
   };
 
-  // Server-side and "timestamp from the past" events ride alongside an
-  // existing client session if there is one — they don't open / close
-  // sessions of their own.
-  if (uaInfo.isServer || isTimestampFromThePast) {
+  // Server-side events ride alongside an existing client session if there is
+  // one — they don't open / close sessions of their own. A past server event
+  // keeps the ids the producer minted rather than joining today's session.
+  if (uaInfo.isServer) {
     const session =
       profileId && !isTimestampFromThePast
         ? await deps.sessions.getExistingSession({ profileId, projectId })
@@ -362,9 +421,9 @@ async function ingestIncomingEvent(
       properties: session
         ? inheritSessionUtm(baseEvent.properties, session)
         : baseEvent.properties,
-      referrer: session?.referrer ?? undefined,
-      referrerName: session?.referrer_name ?? undefined,
-      referrerType: session?.referrer_type ?? undefined,
+      referrer: session?.referrer ?? baseEvent.referrer,
+      referrerName: session?.referrer_name ?? baseEvent.referrerName,
+      referrerType: session?.referrer_type ?? baseEvent.referrerType,
       path: session?.exit_path ?? baseEvent.path,
       origin: session?.exit_origin ?? baseEvent.origin,
       os: session?.os ?? baseEvent.os,
@@ -395,6 +454,14 @@ async function ingestIncomingEvent(
       'Skipping session_start and event (excluded by project filter)'
     );
     return null;
+  }
+
+  if (isTimestampFromThePast) {
+    return await ingestHistoricalEvent(
+      { ...baseEvent, id: eventId },
+      logger,
+      deps
+    );
   }
 
   // The single source of truth for session lifecycle. Reads the current

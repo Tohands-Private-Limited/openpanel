@@ -39,7 +39,7 @@ export const kafkaDeadLetterFailedTotal = new client.Counter({
 export const sessionsStarted = new client.Counter({
   name: 'sessions_started_total',
   help: 'session_start events emitted, by lifecycle kind',
-  labelNames: ['kind'], // 'new' | 'boundary'
+  labelNames: ['kind'], // 'new' | 'boundary' | 'historical' (FORK)
   registers: [registry],
 });
 
