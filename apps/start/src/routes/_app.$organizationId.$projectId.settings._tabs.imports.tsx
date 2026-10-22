@@ -1,4 +1,4 @@
-import { IMPORT_PROVIDERS } from '@openpanel/importer/providers';
+import { IMPORT_PROVIDERS } from '@openpanel/core/modules/import/import.constants';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { createFileRoute } from '@tanstack/react-router';
 import { formatDistanceToNow } from 'date-fns';
@@ -228,7 +228,7 @@ function ImportsSettings() {
                   </TableCell>
                   <TableCell>
                     {imp.totalEvents > 0 ? (
-                      <div className="space-y-1 font-mono">
+                      <div className="space-y-1 tabular-nums">
                         <div className="text-sm">
                           {imp.processedEvents.toLocaleString()}
                           {' / '}
@@ -252,7 +252,7 @@ function ImportsSettings() {
                         )}
                       </div>
                     ) : imp.totalEvents === -1 ? (
-                      <div className="font-mono text-sm">
+                      <div className="text-sm tabular-nums">
                         {imp.processedEvents.toLocaleString()}
                         {' / '}
                         N/A
@@ -265,7 +265,7 @@ function ImportsSettings() {
                   <TableCell>
                     <Tooltiper
                       content={
-                        <pre className="whitespace-pre-wrap break-words font-mono text-sm leading-normal">
+                        <pre className="whitespace-pre-wrap break-words text-xs tabular-nums">
                           {JSON.stringify(imp.config, null, 2)}
                         </pre>
                       }

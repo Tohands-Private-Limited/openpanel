@@ -1,8 +1,8 @@
 import { Link, Text } from '@react-email/components';
-import React from 'react';
 import { z } from 'zod';
 import { Layout } from '../components/layout';
 import { List } from '../components/list';
+import { withUtm } from '../utm';
 
 export const zOnboardingWelcome = z.object({
   firstName: z.string().optional(),
@@ -33,7 +33,9 @@ export function OnboardingWelcome({
             look around your dashboard and reply if anything looks off.
           </Text>
           <Text>
-            <Link href={dashboardUrl}>Open your dashboard</Link>
+            <Link href={withUtm(dashboardUrl, 'onboarding-welcome')}>
+              Open your dashboard
+            </Link>
           </Text>
         </>
       ) : (
@@ -45,14 +47,20 @@ export function OnboardingWelcome({
           <List
             items={[
               <Link
+                href={withUtm(
+                  'https://openpanel.dev/docs/get-started/install-openpanel',
+                  'onboarding-welcome'
+                )}
                 key="install"
-                href={'https://openpanel.dev/docs/get-started/install-openpanel'}
               >
                 Install the tracking script
               </Link>,
               <Link
+                href={withUtm(
+                  'https://openpanel.dev/docs/get-started/track-events',
+                  'onboarding-welcome'
+                )}
                 key="track"
-                href={'https://openpanel.dev/docs/get-started/track-events'}
               >
                 Track custom events
               </Link>,

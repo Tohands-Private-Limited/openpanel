@@ -1,5 +1,5 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import { emailCategories } from '@openpanel/constants';
+import { emailCategories } from '@openpanel/core/modules/email/email.constants';
 import {
   useMutation,
   useQueryClient,
@@ -93,31 +93,30 @@ function Component() {
           </p>
 
           <div className="space-y-4">
-            {Object.entries(emailCategories).map(([category, label]) => (
-              <Controller
-                control={control}
-                key={category}
-                name={`categories.${category}`}
-                render={({ field }) => (
-                  <div className="flex items-center justify-between gap-4 rounded-md border border-border px-4 py-4 transition-colors hover:bg-def-200">
-                    <div className="flex-1">
-                      <div className="font-medium">{label}</div>
-                      <div className="text-muted-foreground text-sm">
-                        {category === 'onboarding' &&
-                          'Get started tips and guidance emails'}
-                        {category === 'billing' &&
-                          'Subscription updates and payment reminders'}
+            {Object.entries(emailCategories).map(
+              ([category, { label, description }]) => (
+                <Controller
+                  control={control}
+                  key={category}
+                  name={`categories.${category}`}
+                  render={({ field }) => (
+                    <div className="flex items-center justify-between gap-4 rounded-md border border-border px-4 py-4 transition-colors hover:bg-def-200">
+                      <div className="flex-1">
+                        <div className="font-medium">{label}</div>
+                        <div className="text-muted-foreground text-sm">
+                          {description}
+                        </div>
                       </div>
+                      <Switch
+                        checked={field.value}
+                        disabled={mutation.isPending}
+                        onCheckedChange={field.onChange}
+                      />
                     </div>
-                    <Switch
-                      checked={field.value}
-                      disabled={mutation.isPending}
-                      onCheckedChange={field.onChange}
-                    />
-                  </div>
-                )}
-              />
-            ))}
+                  )}
+                />
+              )
+            )}
           </div>
 
           <Button

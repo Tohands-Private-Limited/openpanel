@@ -1,6 +1,5 @@
 import { Section, SectionHeader } from '@/components/section';
-import { CompareTechnicalComparison } from '@/lib/compare';
-import { CheckIcon, XIcon } from 'lucide-react';
+import type { CompareTechnicalComparison } from '@/lib/compare';
 import { cn } from '@/lib/utils';
 
 interface TechnicalComparisonProps {
@@ -8,12 +7,15 @@ interface TechnicalComparisonProps {
   competitorName: string;
 }
 
-function renderValue(value: string | string[]) {
+function TechnicalValue({ value }: { value: string | string[] }) {
   if (Array.isArray(value)) {
     return (
-      <ul className="col gap-1">
-        {value.map((item, idx) => (
-          <li key={idx} className="text-sm">
+      <ul className="flex flex-wrap gap-1.5">
+        {value.map((item) => (
+          <li
+            className="rounded-md border bg-muted/30 px-2 py-0.5 text-xs"
+            key={item}
+          >
             {item}
           </li>
         ))}
@@ -30,36 +32,40 @@ export function TechnicalComparison({
   return (
     <Section className="container">
       <SectionHeader
-        title={technical.title}
         description={technical.intro}
+        title={technical.title}
         variant="sm"
       />
-      <div className="mt-12 border rounded-2xl overflow-hidden">
+      <div className="mt-12 overflow-hidden rounded-2xl border">
         <div className="overflow-x-auto">
           <table className="w-full">
             <thead>
               <tr className="border-b bg-muted/30">
-                <th className="text-left p-4 font-semibold">Feature</th>
-                <th className="text-left p-4 font-semibold">OpenPanel</th>
-                <th className="text-left p-4 font-semibold">{competitorName}</th>
+                <th className="p-4 text-left font-semibold">Feature</th>
+                <th className="p-4 text-left font-semibold">OpenPanel</th>
+                <th className="p-4 text-left font-semibold">
+                  {competitorName}
+                </th>
               </tr>
             </thead>
             <tbody>
               {technical.items.map((item, index) => (
                 <tr
-                  key={item.label}
                   className={cn(
                     'border-b last:border-b-0',
                     index % 2 === 0 ? 'bg-background' : 'bg-muted/20'
                   )}
+                  key={item.label}
                 >
-                  <td className="p-4 font-medium">{item.label}</td>
-                  <td className="p-4">{renderValue(item.openpanel)}</td>
-                  <td className="p-4 text-muted-foreground">
+                  <td className="p-4 align-top font-medium">{item.label}</td>
+                  <td className="p-4 align-top">
+                    <TechnicalValue value={item.openpanel} />
+                  </td>
+                  <td className="p-4 align-top text-muted-foreground">
                     <div className="col gap-1">
-                      {renderValue(item.competitor)}
+                      <TechnicalValue value={item.competitor} />
                       {item.notes && (
-                        <span className="text-xs text-muted-foreground/70 mt-1">
+                        <span className="mt-1 text-muted-foreground/70 text-xs">
                           {item.notes}
                         </span>
                       )}
@@ -74,4 +80,3 @@ export function TechnicalComparison({
     </Section>
   );
 }
-

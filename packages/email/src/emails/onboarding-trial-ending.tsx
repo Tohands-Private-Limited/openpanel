@@ -1,8 +1,8 @@
 import { Link, Text } from '@react-email/components';
-import React from 'react';
 import { z } from 'zod';
 import { Button } from '../components/button';
 import { Layout } from '../components/layout';
+import { withUtm } from '../utm';
 
 export const zOnboardingTrialEnding = z.object({
   firstName: z.string().optional(),
@@ -27,11 +27,6 @@ export function OnboardingTrialEnding({
   eventsCount,
   unsubscribeUrl,
 }: Props & { unsubscribeUrl?: string }) {
-  const newUrl = new URL(billingUrl);
-  newUrl.searchParams.set('utm_source', 'email');
-  newUrl.searchParams.set('utm_medium', 'email');
-  newUrl.searchParams.set('utm_campaign', 'onboarding-trial-ending');
-
   const endsOn = trialEndDate ? `on ${trialEndDate}` : 'in a few days';
 
   if (!hasData) {
@@ -46,7 +41,10 @@ export function OnboardingTrialEnding({
           If the timing was just off, you can install now and use the last few
           days to see if it's useful:{' '}
           <Link
-            href={'https://openpanel.dev/docs/get-started/install-openpanel'}
+            href={withUtm(
+              'https://openpanel.dev/docs/get-started/install-openpanel',
+              'onboarding-trial-ending'
+            )}
           >
             install guide
           </Link>
@@ -79,7 +77,9 @@ export function OnboardingTrialEnding({
         workspace is removed.
       </Text>
       <Text>
-        <Button href={newUrl.toString()}>Upgrade</Button>
+        <Button href={withUtm(billingUrl, 'onboarding-trial-ending')}>
+          Upgrade
+        </Button>
       </Text>
       <Text>
         If something is holding you back, reply and tell me. I'd rather fix the
@@ -96,5 +96,5 @@ OnboardingTrialEnding.PreviewProps = {
   recommendedPlan: '100K events per month for $20.00',
   trialEndDate: 'June 16',
   hasData: true,
-  eventsCount: 84211,
+  eventsCount: 84_211,
 };

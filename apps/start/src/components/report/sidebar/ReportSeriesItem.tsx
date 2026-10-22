@@ -1,13 +1,17 @@
-import { ColorSquare } from '@/components/color-square';
-import { useDispatch } from '@/redux';
-import { shortId } from '@openpanel/common';
-import { alphabetIds } from '@openpanel/constants';
-import type { IChartEvent, IChartEventItem } from '@openpanel/validation';
-import { DatabaseIcon, FilterIcon, type LucideIcon } from 'lucide-react';
+import type {
+  IChartEvent,
+  IChartEventItem,
+} from '@openpanel/core/modules/report/report.constants';
+import { alphabetIds } from '@openpanel/core/modules/report/report.constants';
+import { shortId } from '@openpanel/shared';
+import { DatabaseIcon, FilterIcon } from 'lucide-react';
 import { ReportSegment } from '../ReportSegment';
 import { changeEvent } from '../reportSlice';
-import { PropertiesCombobox } from './PropertiesCombobox';
 import { FiltersList } from './filters/FiltersList';
+import { PropertiesCombobox } from './PropertiesCombobox';
+import { BuilderChip } from './sidebar-section';
+import { ColorSquare } from '@/components/color-square';
+import { useDispatch } from '@/redux';
 
 export interface ReportSeriesItemProps
   extends React.HTMLAttributes<HTMLDivElement> {
@@ -41,7 +45,7 @@ export function ReportSeriesItem({
 
   return (
     <div {...props}>
-      <div className="flex items-center gap-2 p-2 group">
+      <div className="group flex items-center gap-2 px-3 py-2.5">
         {renderDragHandle ? (
           renderDragHandle(index)
         ) : (
@@ -54,31 +58,34 @@ export function ReportSeriesItem({
 
       {/* Segment and Filter buttons - only for events */}
       {chartEvent && (showSegment || showAddFilter) && (
-        <div className="flex gap-2 p-2 pt-0">
+        <div className="flex flex-wrap gap-1 px-3 pb-2.5 pl-10">
           {showSegment && (
             <ReportSegment
-              value={chartEvent.segment}
+              className="h-7 px-2 text-muted-foreground text-xs hover:text-foreground"
               onChange={(segment) => {
                 dispatch(
                   changeEvent({
                     ...chartEvent,
                     segment,
-                  }),
+                  })
                 );
               }}
+              size="sm"
+              value={chartEvent.segment}
+              variant="ghost"
             />
           )}
           {showAddFilter && (
             <PropertiesCombobox
-              event={chartEvent}
               categories={['event', 'profile', 'group', 'cohort']}
+              event={chartEvent}
               onSelect={(action) => {
                 const isCohortAction = action.value === 'cohort';
                 if (
                   isCohortAction &&
                   chartEvent.filters.some(
                     (f) =>
-                      f.operator === 'inCohort' || f.operator === 'notInCohort',
+                      f.operator === 'inCohort' || f.operator === 'notInCohort'
                   )
                 ) {
                   return;
@@ -104,44 +111,44 @@ export function ReportSeriesItem({
                             type: 'string',
                           },
                     ],
-                  }),
+                  })
                 );
               }}
             >
               {(setOpen) => (
-                <SmallButton
-                  onClick={() => setOpen((p) => !p)}
+                <BuilderChip
                   icon={FilterIcon}
+                  onClick={() => setOpen((p) => !p)}
                 >
                   Add filter
-                </SmallButton>
+                </BuilderChip>
               )}
             </PropertiesCombobox>
           )}
 
           {showSegment && chartEvent.segment.startsWith('property_') && (
             <PropertiesCombobox
-              include={chartEvent.name === 'session_end' ? ['duration'] : []}
               event={chartEvent}
+              include={chartEvent.name === 'session_end' ? ['duration'] : []}
               onSelect={(item) => {
                 dispatch(
                   changeEvent({
                     ...chartEvent,
                     property: item.value,
                     type: 'event',
-                  }),
+                  })
                 );
               }}
             >
               {(setOpen) => (
-                <SmallButton
+                <BuilderChip
                   icon={DatabaseIcon}
                   onClick={() => setOpen((p) => !p)}
                 >
                   {chartEvent.property
                     ? `Property: ${chartEvent.property}`
                     : 'Select property'}
-                </SmallButton>
+                </BuilderChip>
               )}
             </PropertiesCombobox>
           )}
@@ -154,25 +161,5 @@ export function ReportSeriesItem({
         <FiltersList event={chartEvent} skipNameFilter={isSelectManyEvents} />
       )}
     </div>
-  );
-}
-
-function SmallButton({
-  children,
-  icon: Icon,
-  ...props
-}: {
-  children: React.ReactNode;
-  icon: LucideIcon;
-} & React.ButtonHTMLAttributes<HTMLButtonElement>) {
-  return (
-    <button
-      type="button"
-      className="flex items-center gap-1 rounded-md border border-border bg-card p-1 px-2 text-sm font-medium leading-none text-left min-w-0"
-      {...props}
-    >
-      <Icon size={12} className="shrink-0" />
-      <span className="truncate">{children}</span>
-    </button>
   );
 }

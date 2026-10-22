@@ -23,62 +23,95 @@ type Recipe = {
   subscriptionCanceledAt: Date | null;
   subscriptionStartsAt: Date | null;
   subscriptionEndsAt: Date | null;
+  subscriptionPauseAtPeriodEnd: boolean;
+  subscriptionResumesAt: Date | null;
 };
+
+const base = {
+  subscriptionPauseAtPeriodEnd: false,
+  subscriptionResumesAt: null,
+} as const;
 
 const recipes: Record<string, () => Recipe> = {
   trialing: () => ({
+    ...base,
     subscriptionStatus: null,
     subscriptionCanceledAt: null,
     subscriptionStartsAt: null,
     subscriptionEndsAt: future(),
   }),
   trial_expired: () => ({
+    ...base,
     subscriptionStatus: null,
     subscriptionCanceledAt: null,
     subscriptionStartsAt: null,
     subscriptionEndsAt: past(),
   }),
   active: () => ({
+    ...base,
     subscriptionStatus: 'active',
     subscriptionCanceledAt: null,
     subscriptionStartsAt: new Date(),
     subscriptionEndsAt: future(),
   }),
   canceling: () => ({
+    ...base,
     subscriptionStatus: 'active',
     subscriptionCanceledAt: new Date(),
     subscriptionStartsAt: new Date(),
     subscriptionEndsAt: future(),
   }),
   canceled: () => ({
+    ...base,
     subscriptionStatus: 'canceled',
     subscriptionCanceledAt: past(),
     subscriptionStartsAt: monthAgo(),
     subscriptionEndsAt: past(),
   }),
   past_due: () => ({
+    ...base,
     subscriptionStatus: 'past_due',
     subscriptionCanceledAt: null,
     subscriptionStartsAt: monthAgo(),
     subscriptionEndsAt: future(),
   }),
   unpaid: () => ({
+    ...base,
     subscriptionStatus: 'unpaid',
     subscriptionCanceledAt: null,
     subscriptionStartsAt: monthAgo(),
     subscriptionEndsAt: future(),
   }),
   incomplete: () => ({
+    ...base,
     subscriptionStatus: 'incomplete',
     subscriptionCanceledAt: null,
     subscriptionStartsAt: new Date(),
     subscriptionEndsAt: future(),
   }),
   expired: () => ({
+    ...base,
     subscriptionStatus: 'active',
     subscriptionCanceledAt: null,
     subscriptionStartsAt: monthAgo(),
     subscriptionEndsAt: past(),
+  }),
+  pausing: () => ({
+    ...base,
+    subscriptionStatus: 'active',
+    subscriptionCanceledAt: null,
+    subscriptionStartsAt: new Date(),
+    subscriptionEndsAt: future(),
+    subscriptionPauseAtPeriodEnd: true,
+    subscriptionResumesAt: new Date(Date.now() + 60 * DAY),
+  }),
+  paused: () => ({
+    ...base,
+    subscriptionStatus: 'paused',
+    subscriptionCanceledAt: null,
+    subscriptionStartsAt: monthAgo(),
+    subscriptionEndsAt: past(),
+    subscriptionResumesAt: new Date(Date.now() + 30 * DAY),
   }),
 };
 
@@ -86,7 +119,7 @@ async function main() {
   const state = process.argv[2];
   const orgId = process.argv[3] ?? 'openpanel-dev';
 
-  if (!state || !recipes[state]) {
+  if (!(state && recipes[state])) {
     console.error(
       `Usage: set-subscription-state <state> [orgId]\n\nStates: ${Object.keys(recipes).join(', ')}`
     );
@@ -102,10 +135,13 @@ async function main() {
   delete process.env.SELF_HOSTED;
   const resolved = getSubscriptionState(recipe);
 
-  console.log(`Set ${orgId} -> requested "${state}", resolves to "${resolved}"`);
+  console.log(
+    `Set ${orgId} -> requested "${state}", resolves to "${resolved}"`
+  );
   console.table({
     subscriptionStatus: recipe.subscriptionStatus,
-    subscriptionCanceledAt: recipe.subscriptionCanceledAt?.toISOString() ?? null,
+    subscriptionCanceledAt:
+      recipe.subscriptionCanceledAt?.toISOString() ?? null,
     subscriptionStartsAt: recipe.subscriptionStartsAt?.toISOString() ?? null,
     subscriptionEndsAt: recipe.subscriptionEndsAt?.toISOString() ?? null,
   });

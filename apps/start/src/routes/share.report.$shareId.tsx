@@ -1,3 +1,6 @@
+import { useSuspenseQuery } from '@tanstack/react-query';
+import { createFileRoute, notFound, useSearch } from '@tanstack/react-router';
+import { z } from 'zod';
 import { ShareEnterPassword } from '@/components/auth/share-enter-password';
 import { FullPageEmptyState } from '@/components/full-page-empty-state';
 import FullPageLoadingState from '@/components/full-page-loading-state';
@@ -7,9 +10,6 @@ import { OverviewRange } from '@/components/overview/overview-range';
 import { useOverviewOptions } from '@/components/overview/useOverviewOptions';
 import { ReportChart } from '@/components/report-chart';
 import { useTRPC } from '@/integrations/trpc/react';
-import { useSuspenseQuery } from '@tanstack/react-query';
-import { createFileRoute, notFound, useSearch } from '@tanstack/react-router';
-import { z } from 'zod';
 
 const shareSearchSchema = z.object({
   header: z.optional(z.number().or(z.string().or(z.boolean()))),
@@ -22,7 +22,7 @@ export const Route = createFileRoute('/share/report/$shareId')({
     const share = await context.queryClient.ensureQueryData(
       context.trpc.share.report.queryOptions({
         shareId: params.shareId,
-      }),
+      })
     );
 
     if (!share) {
@@ -32,7 +32,9 @@ export const Route = createFileRoute('/share/report/$shareId')({
     return { share };
   },
   head: ({ loaderData }) => {
-    if (!loaderData || !loaderData.share) {
+    const share = loaderData?.share;
+
+    if (!share) {
       return {
         meta: [
           {
@@ -42,10 +44,21 @@ export const Route = createFileRoute('/share/report/$shareId')({
       };
     }
 
+    // A locked share deliberately carries no report, so title it by owner only.
+    if (share.requiresPassword) {
+      return {
+        meta: [
+          {
+            title: `${share.organization?.name} - OpenPanel.dev`,
+          },
+        ],
+      };
+    }
+
     return {
       meta: [
         {
-          title: `${loaderData.share.report.name || 'Report'} - ${loaderData.share.organization?.name} - OpenPanel.dev`,
+          title: `${share.report.name || 'Report'} - ${share.organization?.name} - OpenPanel.dev`,
         },
       ],
     };
@@ -53,9 +66,9 @@ export const Route = createFileRoute('/share/report/$shareId')({
   pendingComponent: FullPageLoadingState,
   errorComponent: () => (
     <FullPageEmptyState
-      title="Share not found"
-      description="The report you are looking for does not exist."
       className="min-h-[calc(100vh-theme(spacing.16))]"
+      description="The report you are looking for does not exist."
+      title="Share not found"
     />
   ),
 });
@@ -68,23 +81,18 @@ function RouteComponent() {
   const shareQuery = useSuspenseQuery(
     trpc.share.report.queryOptions({
       shareId,
-    }),
+    })
   );
-
-  const hasAccess = shareQuery.data?.hasAccess;
-
-  if (!shareQuery.data) {
-    throw notFound();
-  }
-
-  if (!shareQuery.data.public) {
-    throw notFound();
-  }
 
   const share = shareQuery.data;
 
-  // Handle password protection
-  if (share.password && !hasAccess) {
+  if (!share) {
+    throw notFound();
+  }
+
+  // The server refuses non-public shares outright and withholds the report
+  // until the password cookie is present, so this only picks the UI.
+  if (share.requiresPassword) {
     return <ShareEnterPassword shareId={share.id} shareType="report" />;
   }
 
@@ -99,7 +107,7 @@ function RouteComponent() {
         </div>
       )}
       <div className="sticky-header [animation-range:50px_100px]!">
-        <div className="p-4 col gap-2 mx-auto max-w-7xl">
+        <div className="col mx-auto max-w-7xl gap-2 p-4">
           <div className="row justify-between">
             <div className="flex gap-2">
               <OverviewRange />
@@ -110,7 +118,7 @@ function RouteComponent() {
       </div>
       <div className="mx-auto max-w-7xl p-4">
         <div className="card">
-          <div className="p-4 border-b">
+          <div className="border-b p-4">
             <div className="font-medium text-xl">{share.report.name}</div>
           </div>
           <div className="p-4">
