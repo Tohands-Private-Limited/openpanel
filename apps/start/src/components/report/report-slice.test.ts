@@ -4,7 +4,10 @@ import reducer, {
   changeChartType,
   changeConversionYAxisScale,
   changeFunnelWindow,
+  changeSankeyExclude,
+  changeSankeyInclude,
   changeSankeyLabelBy,
+  changeSankeyMode,
   changeSankeySteps,
   removeEvent,
   setReport,
@@ -113,6 +116,17 @@ describe('sankey label-by', () => {
     expect(
       state.options?.type === 'sankey' ? state.options.labelBy : 'wrong'
     ).toEqual([]);
+  });
+
+  test.each([
+    ['changeSankeyMode', () => changeSankeyMode('before')],
+    ['changeSankeyExclude', () => changeSankeyExclude(['tap'])],
+    ['changeSankeyInclude', () => changeSankeyInclude(['tap'])],
+  ])('%s seeds the default when it creates the options', (_name, action) => {
+    const state = reducer(undefined, action());
+    expect(
+      state.options?.type === 'sankey' ? state.options.labelBy : 'wrong'
+    ).toEqual([{ event: 'screen_view', property: 'path' }]);
   });
 
   test('changeSankeyLabelBy creates sankey options when none exist', () => {

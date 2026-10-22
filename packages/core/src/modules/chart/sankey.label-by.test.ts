@@ -6,9 +6,15 @@ import { testServiceDeps } from '../../../test/service-deps';
 import type { ServiceDeps } from '../../services';
 import {
   type ISankeyLabelRule,
+  zReportInput,
   zSankeyOptions,
 } from '../report/report.constants';
-import { getSankey, type SankeyResult } from './sankey.service';
+import { getSankeyChart } from './chart.service';
+import {
+  getSankey,
+  getUserFlowCore,
+  type SankeyResult,
+} from './sankey.service';
 import {
   type SankeyPathsInput,
   sankeyBetweenTopEntriesQuery,
@@ -332,5 +338,62 @@ describe('getSankey with node label rules', () => {
     expect(
       await flow({ labelBy: [{ event: 'screen_view', property: 'nope' }] })
     ).toEqual(await flow({}));
+  });
+
+  describe('entry points pass labelBy through', () => {
+    // The fixture project lives only in ClickHouse; answer the timezone lookup.
+    const withProjectSettings = (): ServiceDeps => {
+      const db = new Proxy(deps.db, {
+        get: (target, key) =>
+          key === 'project'
+            ? {
+                findUniqueOrThrow: async () => ({
+                  organization: { id: 'org', timezone: 'UTC' },
+                }),
+              }
+            : Reflect.get(target, key),
+      });
+      return new Proxy(deps, {
+        get: (target, key) => (key === 'db' ? db : Reflect.get(target, key)),
+      });
+    };
+
+    it('getSankeyChart reads the saved report options', async () => {
+      const input = zReportInput.parse({
+        projectId: PROJECT_ID,
+        startDate: START,
+        endDate: END,
+        range: 'custom',
+        chartType: 'sankey',
+        interval: 'day',
+        breakdowns: [],
+        series: [{ ...chartEvent('session_start'), id: 'A' }],
+        options: {
+          type: 'sankey',
+          mode: 'after',
+          steps: STEPS,
+          exclude: [],
+          labelBy: SCREEN_VIEW_BY_PATH,
+        },
+      });
+
+      const result = await getSankeyChart(withProjectSettings(), input);
+
+      expect(nodeValues(result)['/home::step2']).toBe(3);
+    });
+
+    it('getUserFlowCore (assistant / MCP) accepts rules too', async () => {
+      const result = await getUserFlowCore(withProjectSettings(), {
+        projectId: PROJECT_ID,
+        startDate: START,
+        endDate: END,
+        startEvent: 'session_start',
+        mode: 'after',
+        steps: STEPS,
+        labelBy: SCREEN_VIEW_BY_PATH,
+      });
+
+      expect(JSON.stringify(result)).toContain('/home');
+    });
   });
 });

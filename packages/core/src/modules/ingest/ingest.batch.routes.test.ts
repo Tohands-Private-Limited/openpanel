@@ -215,6 +215,38 @@ describe('POST /track — single event', () => {
   });
 });
 
+describe('missing project', () => {
+  it('refuses a batch from a client without a project with 400', async () => {
+    validateIngestRequest.mockImplementationOnce(async () => ({
+      ok: true as const,
+      client: { id: CLIENT_ID, projectId: null as unknown as string },
+      secretVerified: true,
+    }));
+
+    const response = await post('/track', {
+      type: 'batch',
+      payload: [trackEvent('a')],
+    });
+
+    expect(response.status).toBe(400);
+  });
+});
+
+describe('POST /event (legacy)', () => {
+  it('refuses an event older than 5 days with 400', async () => {
+    const response = await post('/event', {
+      name: 'legacy',
+      timestamp: new Date().toISOString(),
+      properties: {
+        __timestamp: new Date(Date.now() - 6 * DAY_MS).toISOString(),
+      },
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain('older than 5 days');
+  });
+});
+
 describe('POST /track/batch (deprecated)', () => {
   it('answers like the envelope and logs the deprecated call', async () => {
     const response = await post('/track/batch', {
