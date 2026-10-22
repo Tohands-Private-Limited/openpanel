@@ -1,14 +1,11 @@
 import type { ClickHouseClient } from '@clickhouse/client';
-import type { ILogger } from '@openpanel/logger';
+import type { ILogger } from '../logger';
 
 /**
  * Round-robin selection across multiple ClickHouse clients with simple
  * health tracking and a withRetry wrapper that moves to a different node
- * on connection failures.
- *
- * The Hetzner LB experience taught us that L4 TCP forwarders can add
- * unbounded tail latency. Instead of going through an LB, we now hold a
- * direct connection to each CH node and pick between them ourselves.
+ * on connection failures. Used instead of an L4 load balancer, which can add
+ * unbounded tail latency.
  */
 
 export interface ClientSlot {
@@ -18,7 +15,7 @@ export interface ClientSlot {
 }
 
 /**
- * Three buckets of error:
+ * Four classes of error:
  *
  * - `node-down`: TCP/DNS/CONNECT-level failure. The node is genuinely
  *   unreachable from this worker right now. **Retry on next node AND
@@ -93,6 +90,34 @@ const TRANSIENT_BARE_CODE_REGEX = /\b(ECONNRESET|EPIPE)\b/;
  *  all of them. */
 const CH_SERVER_ERROR_PREFIX = /^Code:\s*\d+/;
 
+/** The one CH *server* error worth retrying: TOO_MANY_SIMULTANEOUS_QUERIES
+ *  (code 202). The query is fine — the node just hit its concurrent-query
+ *  cap at that instant, so another node (or the same one after backoff) can
+ *  absorb it, which is exactly what this retry loop provides. Deliberately
+ *  a single-entry allow-list: every other CH server error (SQL, auth,
+ *  MEMORY_LIMIT_EXCEEDED, ...) still propagates immediately, because
+ *  retrying those either can't help or piles more load on a struggling
+ *  cluster. Matched by @clickhouse/client's parsed fields (code/type) and
+ *  by message text for errors that arrive re-wrapped. */
+const RETRIABLE_CH_ERROR_CODE = 202;
+const RETRIABLE_CH_ERROR_NAME = 'TOO_MANY_SIMULTANEOUS_QUERIES';
+const RETRIABLE_CH_MESSAGE = 'Too many simultaneous queries';
+
+function isRetriableChServerError(
+  e: { code?: unknown; type?: unknown },
+  msg: string
+): boolean {
+  return (
+    // @clickhouse/client parses the code as a string ('202'); accept the
+    // numeric form too for errors re-wrapped by other layers.
+    e.code === String(RETRIABLE_CH_ERROR_CODE) ||
+    e.code === RETRIABLE_CH_ERROR_CODE ||
+    e.type === RETRIABLE_CH_ERROR_NAME ||
+    msg.includes(RETRIABLE_CH_ERROR_NAME) ||
+    msg.includes(RETRIABLE_CH_MESSAGE)
+  );
+}
+
 export function classifyError(err: unknown): ErrorClass {
   if (!err || typeof err !== 'object') {
     return 'other';
@@ -105,7 +130,13 @@ export function classifyError(err: unknown): ErrorClass {
   };
   const msg = String(e.message ?? '');
 
-  // ── Deny: ClickHouse server errors ────────────────────────────────────
+  // Checked before the server-error deny below. `transient` (not
+  // `node-down`): the node is healthy, just briefly saturated — sin-binning
+  // it would shrink the pool exactly when capacity is scarcest.
+  if (isRetriableChServerError(e, msg)) {
+    return 'transient';
+  }
+
   if (CH_SERVER_ERROR_PREFIX.test(msg)) {
     return 'ch-server';
   }
@@ -113,13 +144,15 @@ export function classifyError(err: unknown): ErrorClass {
     return 'ch-server';
   }
 
-  // ── Explicit error.code wins ──────────────────────────────────────────
   if (typeof e.code === 'string') {
-    if (NODE_DOWN_CODES.has(e.code)) return 'node-down';
-    if (TRANSIENT_CODES.has(e.code)) return 'transient';
+    if (NODE_DOWN_CODES.has(e.code)) {
+      return 'node-down';
+    }
+    if (TRANSIENT_CODES.has(e.code)) {
+      return 'transient';
+    }
   }
 
-  // ── Message keyword fallback ──────────────────────────────────────────
   if (NODE_DOWN_MESSAGE_KEYWORDS.some((k) => msg.includes(k))) {
     return 'node-down';
   }
@@ -127,11 +160,14 @@ export function classifyError(err: unknown): ErrorClass {
     return 'transient';
   }
 
-  // ── Bare-code substring fallback ──────────────────────────────────────
-  if (NODE_DOWN_BARE_CODE_REGEX.test(msg)) return 'node-down';
-  if (TRANSIENT_BARE_CODE_REGEX.test(msg)) return 'transient';
+  if (NODE_DOWN_BARE_CODE_REGEX.test(msg)) {
+    return 'node-down';
+  }
+  if (TRANSIENT_BARE_CODE_REGEX.test(msg)) {
+    return 'transient';
+  }
 
-  // ── Wrapped causes (Node 18+ AggregateError, undici wrapping) ─────────
+  // AggregateError / undici wrap the real error in `cause`.
   if (e.cause) {
     return classifyError(e.cause);
   }
@@ -308,7 +344,10 @@ export async function withRoundRobinRetry<T>(
         },
         errClass === 'node-down'
           ? 'CH node unreachable; sin-binning and retrying on next'
-          : 'CH transient socket error; retrying on next'
+          : // `transient` covers socket-level failures AND retriable server
+            // overload rejections (TOO_MANY_SIMULTANEOUS_QUERIES) — the
+            // err/code fields above identify which.
+            'CH transient error; retrying on next'
       );
       await new Promise((r) => setTimeout(r, delay));
     }

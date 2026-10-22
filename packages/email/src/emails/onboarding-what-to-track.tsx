@@ -1,7 +1,7 @@
 import { Link, Text } from '@react-email/components';
-import React from 'react';
 import { z } from 'zod';
 import { Layout } from '../components/layout';
+import { withUtm } from '../utm';
 
 export const zOnboardingWhatToTrack = z.object({
   firstName: z.string().optional(),
@@ -54,7 +54,10 @@ export function OnboardingWhatToTrack({
             Usually that means the install didn't happen, or something is
             blocking the script. Both are quick to sort out:{' '}
             <Link
-              href={'https://openpanel.dev/docs/get-started/install-openpanel'}
+              href={withUtm(
+                'https://openpanel.dev/docs/get-started/install-openpanel',
+                'onboarding-what-to-track'
+              )}
             >
               install guide
             </Link>
@@ -74,5 +77,5 @@ export function OnboardingWhatToTrack({
 OnboardingWhatToTrack.PreviewProps = {
   firstName: 'Alex',
   hasData: true,
-  eventsCount: 12544,
+  eventsCount: 12_544,
 };

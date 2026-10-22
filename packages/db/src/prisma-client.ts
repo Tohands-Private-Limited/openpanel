@@ -1,5 +1,6 @@
 import { getSubscriptionState } from '@openpanel/payments/subscription-state';
 import { PrismaClient } from './generated/prisma/client';
+import { logger } from './logger';
 
 export * from './generated/prisma/client';
 
@@ -7,12 +8,32 @@ const subscriptionStateNeeds = {
   subscriptionStatus: true,
   subscriptionCanceledAt: true,
   subscriptionEndsAt: true,
+  subscriptionPauseAtPeriodEnd: true,
 } as const;
 
 const getPrismaClient = () => {
-  const prisma = new PrismaClient({
-    log: ['error'],
-  }).$extends({
+  // emit: 'event' keeps the engine from writing prisma:error lines straight
+  // to stderr, so they flow through pino to the OTLP pipeline instead.
+  const client = new PrismaClient({
+    // Prisma's default error format splices file, line and a source snippet
+    // into messages that reach API clients verbatim. `minimal` keeps our
+    // source layout out of a 500.
+    errorFormat: 'minimal',
+    log: [
+      { emit: 'event', level: 'error' },
+      { emit: 'event', level: 'warn' },
+    ],
+  });
+
+  // $on only exists on the base client — keep it before $extends.
+  client.$on('error', (event) => {
+    logger.error({ target: event.target }, `prisma: ${event.message}`);
+  });
+  client.$on('warn', (event) => {
+    logger.warn({ target: event.target }, `prisma: ${event.message}`);
+  });
+
+  const prisma = client.$extends({
     result: {
       organization: {
         subscriptionState: {
@@ -38,6 +59,8 @@ const getPrismaClient = () => {
             return (
               state === 'active' ||
               state === 'canceling' ||
+              state === 'pausing' ||
+              state === 'paused' ||
               state === 'past_due' ||
               state === 'unpaid' ||
               state === 'incomplete'
@@ -74,7 +97,6 @@ const getPrismaClient = () => {
               return org.subscriptionEndsAt;
             }
 
-            // Hedge against edge cases :D
             return new Date(Date.now() + 1000 * 60 * 60 * 24);
           },
         },

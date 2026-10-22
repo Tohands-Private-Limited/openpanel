@@ -1,17 +1,15 @@
-import { Combobox } from '@/components/ui/combobox';
-import { useDispatch, useSelector } from '@/redux';
-
-import { ComboboxEvents } from '@/components/ui/combobox-events';
-import { InputEnter } from '@/components/ui/input-enter';
-import { Label } from '@/components/ui/label';
-import { Switch } from '@/components/ui/switch';
-import { useAppParams } from '@/hooks/use-app-params';
-import { useEventNames } from '@/hooks/use-event-names';
+import type {
+  IChartMetric,
+  IConversionYAxisScale,
+} from '@openpanel/core/modules/report/report.constants';
+import { conversionYAxisScales } from '@openpanel/core/modules/report/report.constants';
 import { useMemo } from 'react';
 import {
+  changeConversionYAxisScale,
   changeCriteria,
   changeFunnelGroup,
   changeFunnelWindow,
+  changeMetric,
   changePrevious,
   changeSankeyExclude,
   changeSankeyInclude,
@@ -20,12 +18,23 @@ import {
   changeStacked,
   changeUnit,
 } from '../reportSlice';
-import { SankeyLabelBy } from './SankeyLabelBy';
+import { Combobox } from '@/components/ui/combobox';
+import { ComboboxEvents } from '@/components/ui/combobox-events';
+import { InputEnter } from '@/components/ui/input-enter';
+import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
+import { useAppParams } from '@/hooks/use-app-params';
+import { useEventNames } from '@/hooks/use-event-names';
+import { useDispatch, useSelector } from '@/redux';
+import { objectToZodEnums } from '@/utils/object-to-zod-enums';
+
+const DEFAULT_CONVERSION_Y_AXIS_SCALE: IConversionYAxisScale = 'fixed';
 
 export function ReportSettings() {
   const chartType = useSelector((state) => state.report.chartType);
   const previous = useSelector((state) => state.report.previous);
   const unit = useSelector((state) => state.report.unit);
+  const metric = useSelector((state) => state.report.metric);
   const options = useSelector((state) => state.report.options);
 
   const retentionOptions = options?.type === 'retention' ? options : undefined;
@@ -34,6 +43,8 @@ export function ReportSettings() {
   const funnelOptions = options?.type === 'funnel' ? options : undefined;
   const funnelGroup = funnelOptions?.funnelGroup;
   const funnelWindow = funnelOptions?.funnelWindow;
+  const conversionYAxisScale =
+    funnelOptions?.yAxisScale ?? DEFAULT_CONVERSION_Y_AXIS_SCALE;
 
   const histogramOptions = options?.type === 'histogram' ? options : undefined;
   const stacked = histogramOptions?.stacked ?? false;
@@ -43,7 +54,7 @@ export function ReportSettings() {
   const eventNames = useEventNames({ projectId });
 
   const fields = useMemo(() => {
-    const fields = [];
+    const fields: string[] = [];
 
     if (chartType !== 'retention' && chartType !== 'sankey') {
       fields.push('previous');
@@ -59,16 +70,24 @@ export function ReportSettings() {
       fields.push('funnelWindow');
     }
 
+    if (chartType === 'conversion') {
+      fields.push('conversionYAxisScale');
+    }
+
     if (chartType === 'sankey') {
       fields.push('sankeyMode');
       fields.push('sankeySteps');
-      fields.push('sankeyLabelBy');
       fields.push('sankeyExclude');
       fields.push('sankeyInclude');
     }
 
     if (chartType === 'histogram') {
       fields.push('stacked');
+    }
+
+    // `map` already reads report.metric; it just never had a way to set it.
+    if (chartType === 'metric' || chartType === 'map') {
+      fields.push('metric');
     }
 
     return fields;
@@ -81,9 +100,9 @@ export function ReportSettings() {
   return (
     <div>
       <h3 className="mb-2 font-medium">Settings</h3>
-      <div className="col rounded-lg border bg-card p-4 gap-4">
+      <div className="col gap-4 rounded-lg border bg-card p-4">
         {fields.includes('previous') && (
-          <Label className="flex items-center justify-between mb-0">
+          <Label className="mb-0 flex items-center justify-between">
             <span className="whitespace-nowrap">
               Compare to previous period
             </span>
@@ -95,14 +114,11 @@ export function ReportSettings() {
         )}
         {fields.includes('criteria') && (
           <div className="flex items-center justify-between gap-4">
-            <Label className="whitespace-nowrap font-medium mb-0">
+            <Label className="mb-0 whitespace-nowrap font-medium">
               Criteria
             </Label>
             <Combobox
               align="end"
-              placeholder="Select criteria"
-              value={criteria}
-              onChange={(val) => dispatch(changeCriteria(val))}
               items={[
                 {
                   label: 'On or After',
@@ -113,19 +129,17 @@ export function ReportSettings() {
                   value: 'on',
                 },
               ]}
+              onChange={(val) => dispatch(changeCriteria(val))}
+              placeholder="Select criteria"
+              value={criteria}
             />
           </div>
         )}
         {fields.includes('unit') && (
           <div className="flex items-center justify-between gap-4">
-            <Label className="whitespace-nowrap font-medium mb-0">Unit</Label>
+            <Label className="mb-0 whitespace-nowrap font-medium">Unit</Label>
             <Combobox
               align="end"
-              placeholder="Unit"
-              value={unit || 'count'}
-              onChange={(val) => {
-                dispatch(changeUnit(val === 'count' ? undefined : val));
-              }}
               items={[
                 {
                   label: 'Count',
@@ -136,23 +150,42 @@ export function ReportSettings() {
                   value: '%',
                 },
               ]}
+              onChange={(val) => {
+                dispatch(changeUnit(val === 'count' ? undefined : val));
+              }}
+              placeholder="Unit"
+              value={unit || 'count'}
+            />
+          </div>
+        )}
+        {fields.includes('metric') && (
+          <div className="flex items-center justify-between gap-4">
+            <Label className="mb-0 whitespace-nowrap font-medium">
+              Aggregation
+            </Label>
+            <Combobox
+              align="end"
+              items={[
+                { label: 'Unique', value: 'count' },
+                { label: 'Sum', value: 'sum' },
+                { label: 'Average', value: 'average' },
+                { label: 'Min', value: 'min' },
+                { label: 'Max', value: 'max' },
+              ]}
+              onChange={(val) => dispatch(changeMetric(val as IChartMetric))}
+              placeholder="Aggregation"
+              // Same labels the report table uses for these columns.
+              value={metric}
             />
           </div>
         )}
         {fields.includes('funnelGroup') && (
           <div className="flex items-center justify-between gap-4">
-            <Label className="whitespace-nowrap font-medium mb-0">
+            <Label className="mb-0 whitespace-nowrap font-medium">
               Funnel Group
             </Label>
             <Combobox
               align="end"
-              placeholder="Default: Session"
-              value={funnelGroup || 'session_id'}
-              onChange={(val) => {
-                dispatch(
-                  changeFunnelGroup(val === 'session_id' ? undefined : val),
-                );
-              }}
               items={[
                 {
                   label: 'Session',
@@ -163,18 +196,22 @@ export function ReportSettings() {
                   value: 'profile_id',
                 },
               ]}
+              onChange={(val) => {
+                dispatch(
+                  changeFunnelGroup(val === 'session_id' ? undefined : val)
+                );
+              }}
+              placeholder="Default: Session"
+              value={funnelGroup || 'session_id'}
             />
           </div>
         )}
         {fields.includes('funnelWindow') && (
           <div className="flex items-center justify-between gap-4">
-            <Label className="whitespace-nowrap font-medium mb-0">
+            <Label className="mb-0 whitespace-nowrap font-medium">
               Funnel Window
             </Label>
             <InputEnter
-              type="number"
-              value={funnelWindow ? String(funnelWindow) : ''}
-              placeholder="Default: 24h"
               onChangeValue={(value) => {
                 const parsed = Number.parseFloat(value);
                 if (Number.isNaN(parsed)) {
@@ -183,21 +220,38 @@ export function ReportSettings() {
                   dispatch(changeFunnelWindow(parsed));
                 }
               }}
+              placeholder="Default: 24h"
+              type="number"
+              value={funnelWindow ? String(funnelWindow) : ''}
+            />
+          </div>
+        )}
+        {fields.includes('conversionYAxisScale') && (
+          <div className="flex items-center justify-between gap-4">
+            <Label className="mb-0 whitespace-nowrap font-medium">Y axis</Label>
+            <Combobox
+              align="end"
+              items={objectToZodEnums(conversionYAxisScales).map((key) => ({
+                label: conversionYAxisScales[key],
+                value: key,
+              }))}
+              onChange={(val) => {
+                dispatch(
+                  changeConversionYAxisScale(
+                    val === DEFAULT_CONVERSION_Y_AXIS_SCALE ? undefined : val
+                  )
+                );
+              }}
+              placeholder="Default: Fixed"
+              value={conversionYAxisScale}
             />
           </div>
         )}
         {fields.includes('sankeyMode') && options?.type === 'sankey' && (
           <div className="flex items-center justify-between gap-4">
-            <Label className="whitespace-nowrap font-medium mb-0">Mode</Label>
+            <Label className="mb-0 whitespace-nowrap font-medium">Mode</Label>
             <Combobox
               align="end"
-              placeholder="Select mode"
-              value={options?.mode || 'after'}
-              onChange={(val) => {
-                dispatch(
-                  changeSankeyMode(val as 'between' | 'after' | 'before'),
-                );
-              }}
               items={[
                 {
                   label: 'After',
@@ -212,16 +266,20 @@ export function ReportSettings() {
                   value: 'between',
                 },
               ]}
+              onChange={(val) => {
+                dispatch(
+                  changeSankeyMode(val as 'between' | 'after' | 'before')
+                );
+              }}
+              placeholder="Select mode"
+              value={options?.mode || 'after'}
             />
           </div>
         )}
         {fields.includes('sankeySteps') && options?.type === 'sankey' && (
           <div className="flex items-center justify-between gap-4">
-            <Label className="whitespace-nowrap font-medium mb-0">Steps</Label>
+            <Label className="mb-0 whitespace-nowrap font-medium">Steps</Label>
             <InputEnter
-              type="number"
-              value={options?.steps ? String(options.steps) : '5'}
-              placeholder="Default: 5"
               onChangeValue={(value) => {
                 const parsed = Number.parseInt(value, 10);
                 if (Number.isNaN(parsed) || parsed < 2 || parsed > 10) {
@@ -230,6 +288,9 @@ export function ReportSettings() {
                   dispatch(changeSankeySteps(parsed));
                 }
               }}
+              placeholder="Default: 5"
+              type="number"
+              value={options?.steps ? String(options.steps) : '5'}
             />
           </div>
         )}
@@ -239,14 +300,14 @@ export function ReportSettings() {
               Exclude Events
             </Label>
             <ComboboxEvents
+              items={eventNames.filter((item) => item.name !== '*')}
               multiple
-              searchable
-              value={options?.exclude || []}
               onChange={(value) => {
                 dispatch(changeSankeyExclude(value));
               }}
-              items={eventNames.filter((item) => item.name !== '*')}
               placeholder="Select events to exclude"
+              searchable
+              value={options?.exclude || []}
             />
           </div>
         )}
@@ -256,31 +317,21 @@ export function ReportSettings() {
               Include events
             </Label>
             <ComboboxEvents
+              items={eventNames.filter((item) => item.name !== '*')}
               multiple
-              searchable
-              value={options?.include || []}
               onChange={(value) => {
                 dispatch(
-                  changeSankeyInclude(value.length > 0 ? value : undefined),
+                  changeSankeyInclude(value.length > 0 ? value : undefined)
                 );
               }}
-              items={eventNames.filter((item) => item.name !== '*')}
               placeholder="Leave empty to include all"
+              searchable
+              value={options?.include || []}
             />
           </div>
         )}
-        {fields.includes('sankeyLabelBy') && options?.type === 'sankey' && (
-          <div className="flex flex-col">
-            <Label className="whitespace-nowrap font-medium">Node label</Label>
-            <span className="mb-2 text-muted-foreground text-sm">
-              Group these events by a property instead of their name. Other
-              events use the event name.
-            </span>
-            <SankeyLabelBy value={options.labelBy ?? []} />
-          </div>
-        )}
         {fields.includes('stacked') && (
-          <Label className="flex items-center justify-between mb-0">
+          <Label className="mb-0 flex items-center justify-between">
             <span className="whitespace-nowrap">Stack series</span>
             <Switch
               checked={stacked}

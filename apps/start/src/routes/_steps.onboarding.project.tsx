@@ -1,5 +1,5 @@
 import { zodResolver } from '@hookform/resolvers/zod';
-import { zOnboardingProject } from '@openpanel/validation';
+import { zOnboardingProject } from '@openpanel/core/modules/onboarding/onboarding.constants';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { createFileRoute, redirect, useNavigate } from '@tanstack/react-router';
 import {
@@ -27,6 +27,8 @@ import { Label } from '@/components/ui/label';
 import { useClientSecret } from '@/hooks/use-client-secret';
 import { handleError, useTRPC } from '@/integrations/trpc/react';
 import { cn } from '@/utils/cn';
+import { op } from '@/utils/op';
+import { isSignedIn } from '@/utils/route-session';
 
 const validateSearch = z.object({
   inviteId: z.string().optional(),
@@ -34,8 +36,8 @@ const validateSearch = z.object({
 export const Route = createFileRoute('/_steps/onboarding/project')({
   component: Component,
   validateSearch,
-  beforeLoad: ({ context }) => {
-    if (!context.session?.session) {
+  beforeLoad: async ({ context }) => {
+    if (!(await isSignedIn(context))) {
       throw redirect({ to: '/onboarding' });
     }
   },
@@ -74,6 +76,7 @@ function Component() {
     trpc.onboarding.project.mutationOptions({
       onError: handleError,
       onSuccess(res) {
+        op.track('onboarding_project_created', { projectId: res.projectId });
         queryClient.invalidateQueries(trpc.organization.list.queryFilter());
         setSecret(res.secret);
         navigate({
@@ -194,10 +197,12 @@ function Component() {
                   <WithLabel label="Timezone">
                     <Combobox
                       className="w-full"
-                      items={Intl.supportedValuesOf('timeZone').map((item) => ({
-                        value: item,
-                        label: item,
-                      }))}
+                      items={['UTC', ...Intl.supportedValuesOf('timeZone')].map(
+                        (item) => ({
+                          value: item,
+                          label: item,
+                        })
+                      )}
                       onChange={field.onChange}
                       placeholder="Select timezone"
                       searchable
@@ -206,21 +211,6 @@ function Component() {
                   </WithLabel>
                 )}
               />
-              {/* {organizations.length > 0 && (
-                <button
-                  className="-mt-2 self-start text-left text-muted-foreground text-sm hover:text-foreground"
-                  onClick={() => {
-                    form.setValue('organization', '', {
-                      shouldValidate: false,
-                    });
-                    form.clearErrors(['organization', 'organizationId']);
-                    setCreateNewOrg(false);
-                  }}
-                  type="button"
-                >
-                  ← Use existing workspace
-                </button>
-              )} */}
             </>
           ) : (
             <div className="col-span-2">
@@ -250,19 +240,6 @@ function Component() {
                   );
                 }}
               />
-              {/* <button
-                className="mt-2 text-muted-foreground text-sm hover:text-foreground"
-                onClick={() => {
-                  form.setValue('organizationId', undefined, {
-                    shouldValidate: false,
-                  });
-                  form.clearErrors(['organization', 'organizationId']);
-                  setCreateNewOrg(true);
-                }}
-                type="button"
-              >
-                + Create new workspace
-              </button> */}
             </div>
           )}
           <InputWithLabel

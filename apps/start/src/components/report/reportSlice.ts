@@ -1,28 +1,28 @@
-import type { PayloadAction } from '@reduxjs/toolkit';
-import { createSlice } from '@reduxjs/toolkit';
-
-import { shortId } from '@openpanel/common';
-import {
-  getDefaultIntervalByDates,
-  getDefaultIntervalByRange,
-  isHourIntervalEnabledByRange,
-  isMinuteIntervalEnabledByRange,
-} from '@openpanel/constants';
 import type {
   IChartBreakdown,
   IChartEventFilter,
   IChartEventItem,
   IChartLineType,
+  IChartMetric,
   IChartRange,
   IChartType,
+  IConversionYAxisScale,
   IInterval,
   IReport,
   IReportOptions,
-  ISankeyLabelRule,
-  UnionOmit,
   zCriteria,
-} from '@openpanel/validation';
+} from '@openpanel/core/modules/report/report.constants';
+import {
+  getDefaultIntervalByDates,
+  getDefaultIntervalByRange,
+  isHourIntervalEnabledByRange,
+  isMinuteIntervalEnabledByRange,
+} from '@openpanel/core/modules/report/report.constants';
+import { shortId } from '@openpanel/shared';
+import type { PayloadAction } from '@reduxjs/toolkit';
+import { createSlice } from '@reduxjs/toolkit';
 import type { z } from 'zod';
+import type { UnionOmit } from '../../utils/union-omit';
 
 type InitialState = IReport & {
   id?: string;
@@ -35,7 +35,6 @@ type InitialState = IReport & {
   globalFilters: IChartEventFilter[];
 };
 
-// First approach: define the initial state using that type
 const initialState: InitialState = {
   ready: false,
   dirty: false,
@@ -59,13 +58,18 @@ const initialState: InitialState = {
   visibleSeries: undefined,
 };
 
-// Default node-label rule seeded onto freshly created Sankey reports: relabel
-// `screen_view` by its `path` so the flow renders per-screen nodes out of the
-// box instead of one collapsed node. A factory (not a shared constant) so each
-// call returns a fresh array Immer can freeze without freezing a reused ref.
-const createDefaultSankeyLabelBy = (): ISankeyLabelRule[] => [
-  { event: 'screen_view', property: 'path' },
-];
+// A breakdown step past the last event series would silently fall back to the
+// first step in the query, so drop it to keep the editor and the chart in step.
+function clearStaleBreakdownSteps(state: InitialState) {
+  const eventCount = state.series.filter(
+    (item) => item.type === 'event'
+  ).length;
+  for (const breakdown of state.breakdowns) {
+    if (breakdown.step && breakdown.step > eventCount) {
+      breakdown.step = undefined;
+    }
+  }
+}
 
 export const reportSlice = createSlice({
   name: 'report',
@@ -104,7 +108,7 @@ export const reportSlice = createSlice({
     // Series (Events and Formulas)
     addSerie: (
       state,
-      action: PayloadAction<UnionOmit<IChartEventItem, 'id'>>,
+      action: PayloadAction<UnionOmit<IChartEventItem, 'id'>>
     ) => {
       state.dirty = true;
       state.series.push({
@@ -134,12 +138,13 @@ export const reportSlice = createSlice({
       state,
       action: PayloadAction<{
         id?: string;
-      }>,
+      }>
     ) => {
       state.dirty = true;
       state.series = state.series.filter((event) => {
         return event.id !== action.payload.id;
       });
+      clearStaleBreakdownSteps(state);
     },
     changeEvent: (state, action: PayloadAction<IChartEventItem>) => {
       state.dirty = true;
@@ -149,6 +154,7 @@ export const reportSlice = createSlice({
         }
         return event;
       });
+      clearStaleBreakdownSteps(state);
     },
 
     // Previous
@@ -160,7 +166,7 @@ export const reportSlice = createSlice({
     // Breakdowns
     addBreakdown: (
       state,
-      action: PayloadAction<Omit<IChartBreakdown, 'id'>>,
+      action: PayloadAction<Omit<IChartBreakdown, 'id'>>
     ) => {
       state.dirty = true;
       state.breakdowns.push({
@@ -172,11 +178,11 @@ export const reportSlice = createSlice({
       state,
       action: PayloadAction<{
         id?: string;
-      }>,
+      }>
     ) => {
       state.dirty = true;
       state.breakdowns = state.breakdowns.filter(
-        (event) => event.id !== action.payload.id,
+        (event) => event.id !== action.payload.id
       );
     },
     changeBreakdown: (state, action: PayloadAction<IChartBreakdown>) => {
@@ -197,13 +203,13 @@ export const reportSlice = createSlice({
     removeGlobalFilter: (state, action: PayloadAction<{ id?: string }>) => {
       state.dirty = true;
       state.globalFilters = state.globalFilters.filter(
-        (filter) => filter.id !== action.payload.id,
+        (filter) => filter.id !== action.payload.id
       );
     },
     changeGlobalFilter: (state, action: PayloadAction<IChartEventFilter>) => {
       state.dirty = true;
       state.globalFilters = state.globalFilters.map((filter) =>
-        filter.id === action.payload.id ? action.payload : filter,
+        filter.id === action.payload.id ? action.payload : filter
       );
     },
 
@@ -218,15 +224,20 @@ export const reportSlice = createSlice({
       state.dirty = true;
       state.chartType = action.payload;
 
-      // Initialize sankey options if switching to sankey, seeding the default
-      // screen_view → path label rule (see createDefaultSankeyLabelBy).
+      // The Metric card has always shown the total unique count. Existing
+      // reports are backfilled to 'count' by migration, so default a newly
+      // switched one the same way rather than leaving old and new metric
+      // reports showing different aggregations. The picker overrides it.
+      if (action.payload === 'metric') {
+        state.metric = 'count';
+      }
+
       if (action.payload === 'sankey' && !state.options) {
         state.options = {
           type: 'sankey',
           mode: 'after',
           steps: 5,
           exclude: [],
-          labelBy: createDefaultSankeyLabelBy(),
         };
       }
 
@@ -258,7 +269,7 @@ export const reportSlice = createSlice({
 
       const interval = getDefaultIntervalByDates(
         state.startDate,
-        state.endDate,
+        state.endDate
       );
       if (interval) {
         state.interval = interval;
@@ -272,7 +283,7 @@ export const reportSlice = createSlice({
 
       const interval = getDefaultIntervalByDates(
         state.startDate,
-        state.endDate,
+        state.endDate
       );
       if (interval) {
         state.interval = interval;
@@ -312,6 +323,11 @@ export const reportSlice = createSlice({
       state.unit = action.payload || undefined;
     },
 
+    changeMetric(state, action: PayloadAction<IChartMetric>) {
+      state.dirty = true;
+      state.metric = action.payload;
+    },
+
     changeFunnelGroup(state, action: PayloadAction<string | undefined>) {
       state.dirty = true;
       if (!state.options || state.options.type !== 'funnel') {
@@ -337,13 +353,29 @@ export const reportSlice = createSlice({
         state.options.funnelWindow = action.payload;
       }
     },
+    changeConversionYAxisScale(
+      state,
+      action: PayloadAction<IConversionYAxisScale | undefined>
+    ) {
+      state.dirty = true;
+      if (!state.options || state.options.type !== 'funnel') {
+        state.options = {
+          type: 'funnel',
+          funnelGroup: undefined,
+          funnelWindow: undefined,
+          yAxisScale: action.payload,
+        };
+      } else {
+        state.options.yAxisScale = action.payload;
+      }
+    },
     changeOptions(state, action: PayloadAction<IReportOptions | undefined>) {
       state.dirty = true;
       state.options = action.payload || undefined;
     },
     changeSankeyMode(
       state,
-      action: PayloadAction<'between' | 'after' | 'before'>,
+      action: PayloadAction<'between' | 'after' | 'before'>
     ) {
       state.dirty = true;
       if (!state.options) {
@@ -352,7 +384,6 @@ export const reportSlice = createSlice({
           mode: action.payload,
           steps: 5,
           exclude: [],
-          labelBy: createDefaultSankeyLabelBy(),
         };
       } else if (state.options.type === 'sankey') {
         state.options.mode = action.payload;
@@ -366,7 +397,6 @@ export const reportSlice = createSlice({
           mode: 'after',
           steps: action.payload,
           exclude: [],
-          labelBy: createDefaultSankeyLabelBy(),
         };
       } else if (state.options.type === 'sankey') {
         state.options.steps = action.payload;
@@ -380,7 +410,6 @@ export const reportSlice = createSlice({
           mode: 'after',
           steps: 5,
           exclude: action.payload,
-          labelBy: createDefaultSankeyLabelBy(),
         };
       } else if (state.options.type === 'sankey') {
         state.options.exclude = action.payload;
@@ -395,24 +424,9 @@ export const reportSlice = createSlice({
           steps: 5,
           exclude: [],
           include: action.payload,
-          labelBy: createDefaultSankeyLabelBy(),
         };
       } else if (state.options.type === 'sankey') {
         state.options.include = action.payload;
-      }
-    },
-    changeSankeyLabelBy(state, action: PayloadAction<ISankeyLabelRule[]>) {
-      state.dirty = true;
-      if (!state.options) {
-        state.options = {
-          type: 'sankey',
-          mode: 'after',
-          steps: 5,
-          exclude: [],
-          labelBy: action.payload,
-        };
-      } else if (state.options.type === 'sankey') {
-        state.options.labelBy = action.payload;
       }
     },
     changeStacked(state, action: PayloadAction<boolean>) {
@@ -428,7 +442,7 @@ export const reportSlice = createSlice({
     },
     reorderEvents(
       state,
-      action: PayloadAction<{ fromIndex: number; toIndex: number }>,
+      action: PayloadAction<{ fromIndex: number; toIndex: number }>
     ) {
       state.dirty = true;
       const { fromIndex, toIndex } = action.payload;
@@ -437,17 +451,13 @@ export const reportSlice = createSlice({
         state.series.splice(toIndex, 0, movedEvent);
       }
     },
-    changeVisibleSeries(
-      state,
-      action: PayloadAction<string[] | undefined>,
-    ) {
+    changeVisibleSeries(state, action: PayloadAction<string[] | undefined>) {
       state.dirty = true;
       state.visibleSeries = action.payload;
     },
   },
 });
 
-// Action creators are generated for each case reducer function
 export const {
   reset,
   ready,
@@ -474,14 +484,15 @@ export const {
   changePrevious,
   changeCriteria,
   changeUnit,
+  changeMetric,
   changeFunnelGroup,
   changeFunnelWindow,
+  changeConversionYAxisScale,
   changeOptions,
   changeSankeyMode,
   changeSankeySteps,
   changeSankeyExclude,
   changeSankeyInclude,
-  changeSankeyLabelBy,
   changeStacked,
   reorderEvents,
   changeVisibleSeries,

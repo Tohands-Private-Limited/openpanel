@@ -139,7 +139,7 @@ export function MapBadgeDetailCard({
                                 .replaceAll('www.', '') || '(Not set)'}
                             </span>
                           </div>
-                          <span className="font-mono">{item.count}</span>
+                          <span className="tabular-nums">{item.count}</span>
                         </div>
                       ))
                     ) : (
@@ -160,7 +160,7 @@ export function MapBadgeDetailCard({
                           key={item.name}
                         >
                           <span className="truncate">{item.name}</span>
-                          <span className="font-mono">{item.count}</span>
+                          <span className="tabular-nums">{item.count}</span>
                         </div>
                       ))
                     ) : (
@@ -183,7 +183,7 @@ export function MapBadgeDetailCard({
                           <span className="truncate">
                             {item.path || '(Not set)'}
                           </span>
-                          <span className="font-mono">{item.count}</span>
+                          <span className="tabular-nums">{item.count}</span>
                         </div>
                       ))
                     ) : (
@@ -200,13 +200,22 @@ export function MapBadgeDetailCard({
                 <div className="space-y-3">
                   {query.data.recentProfiles.length > 0 ? (
                     query.data.recentProfiles.map((profile) => {
-                      const href = profile.profileId
-                        ? `/profiles/${encodeURIComponent(profile.profileId)}`
-                        : `/sessions/${encodeURIComponent(profile.sessionId)}`;
+                      const link: {
+                        to: string;
+                        params: Record<string, string>;
+                      } = profile.profileId
+                        ? {
+                            to: '/profiles/$profileId',
+                            params: { profileId: profile.profileId },
+                          }
+                        : {
+                            to: '/sessions/$sessionId',
+                            params: { sessionId: profile.sessionId },
+                          };
                       return (
                         <ProjectLink
                           className="-mx-1 flex items-center gap-3 rounded-lg px-1 py-0.5 transition-colors hover:bg-def-200"
-                          href={href}
+                          {...link}
                           key={
                             profile.profileId
                               ? `p:${profile.profileId}`

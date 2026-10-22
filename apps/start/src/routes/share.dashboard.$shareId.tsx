@@ -1,23 +1,20 @@
+import { useQuery, useSuspenseQuery } from '@tanstack/react-query';
+import { createFileRoute, notFound, useSearch } from '@tanstack/react-router';
+import { useMemo } from 'react';
+import { z } from 'zod';
 import { ShareEnterPassword } from '@/components/auth/share-enter-password';
+import { DashboardGrid, useDashboardLayout } from '@/components/dashboard-grid';
 import { FullPageEmptyState } from '@/components/full-page-empty-state';
 import FullPageLoadingState from '@/components/full-page-loading-state';
-import { GrafanaGrid, useReportLayouts } from '@/components/grafana-grid';
 import { LoginNavbar } from '@/components/login-navbar';
 import { OverviewInterval } from '@/components/overview/overview-interval';
 import { OverviewRange } from '@/components/overview/overview-range';
 import { useOverviewOptions } from '@/components/overview/useOverviewOptions';
-import { ReportChart } from '@/components/report-chart';
 import {
-  ReportItem,
   ReportItemReadOnly,
   ReportItemSkeleton,
 } from '@/components/report/report-item';
 import { useTRPC } from '@/integrations/trpc/react';
-import { cn } from '@/utils/cn';
-import { timeWindows } from '@openpanel/constants';
-import { useQuery, useSuspenseQuery } from '@tanstack/react-query';
-import { createFileRoute, notFound, useSearch } from '@tanstack/react-router';
-import { z } from 'zod';
 
 const shareSearchSchema = z.object({
   header: z.optional(z.number().or(z.string().or(z.boolean()))),
@@ -30,13 +27,15 @@ export const Route = createFileRoute('/share/dashboard/$shareId')({
     const share = await context.queryClient.ensureQueryData(
       context.trpc.share.dashboard.queryOptions({
         shareId: params.shareId,
-      }),
+      })
     );
 
     return { share };
   },
   head: ({ loaderData }) => {
-    if (!loaderData || !loaderData.share) {
+    const share = loaderData?.share;
+
+    if (!share) {
       return {
         meta: [
           {
@@ -46,10 +45,21 @@ export const Route = createFileRoute('/share/dashboard/$shareId')({
       };
     }
 
+    // A locked share deliberately carries no dashboard, so title it by owner.
+    if (share.requiresPassword) {
+      return {
+        meta: [
+          {
+            title: `${share.organization?.name} - OpenPanel.dev`,
+          },
+        ],
+      };
+    }
+
     return {
       meta: [
         {
-          title: `${loaderData.share.dashboard?.name} - ${loaderData.share.organization?.name} - OpenPanel.dev`,
+          title: `${share.dashboard?.name} - ${share.organization?.name} - OpenPanel.dev`,
         },
       ],
     };
@@ -57,9 +67,9 @@ export const Route = createFileRoute('/share/dashboard/$shareId')({
   pendingComponent: FullPageLoadingState,
   errorComponent: () => (
     <FullPageEmptyState
-      title="Share not found"
-      description="The dashboard you are looking for does not exist."
       className="min-h-[calc(100vh-theme(spacing.16))]"
+      description="The dashboard you are looking for does not exist."
+      title="Share not found"
     />
   ),
 });
@@ -73,39 +83,34 @@ function RouteComponent() {
   const shareQuery = useSuspenseQuery(
     trpc.share.dashboard.queryOptions({
       shareId,
-    }),
+    })
   );
 
-  const reportsQuery = useQuery(
-    trpc.share.dashboardReports.queryOptions({
+  // Not fetched while locked: the server answers FORBIDDEN until the password
+  // cookie is set, and there is nothing to render before then anyway.
+  const reportsQuery = useQuery({
+    ...trpc.share.dashboardReports.queryOptions({
       shareId,
     }),
-  );
-
-  const hasAccess = shareQuery.data?.hasAccess;
-
-  if (!shareQuery.data) {
-    throw notFound();
-  }
-
-  if (!shareQuery.data.public) {
-    throw notFound();
-  }
+    enabled: !shareQuery.data?.requiresPassword,
+  });
 
   const share = shareQuery.data;
+  const reports = useMemo(() => reportsQuery.data ?? [], [reportsQuery.data]);
+  const [layout] = useDashboardLayout(reports);
 
-  // Handle password protection
-  if (share.password && !hasAccess) {
+  if (!share) {
+    throw notFound();
+  }
+
+  // The server refuses non-public shares outright and withholds the dashboard
+  // until the password cookie is present, so this only picks the UI.
+  if (share.requiresPassword) {
     return <ShareEnterPassword shareId={share.id} shareType="dashboard" />;
   }
 
   const isHeaderVisible =
     header !== '0' && header !== 0 && header !== 'false' && header !== false;
-
-  const reports = reportsQuery.data ?? [];
-
-  // Convert reports to grid layout format for all breakpoints
-  const layouts = useReportLayouts(reports);
 
   return (
     <div>
@@ -115,7 +120,7 @@ function RouteComponent() {
         </div>
       )}
       <div className="sticky-header [animation-range:50px_100px]!">
-        <div className="p-4 col gap-2 mx-auto max-w-7xl">
+        <div className="col mx-auto max-w-7xl gap-2 p-4">
           <div className="row justify-between">
             <div className="flex gap-2">
               <OverviewRange />
@@ -126,7 +131,7 @@ function RouteComponent() {
       </div>
       <div className="mx-auto max-w-7xl p-4">
         {reportsQuery.isLoading ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <ReportItemSkeleton />
             <ReportItemSkeleton />
             <ReportItemSkeleton />
@@ -137,20 +142,20 @@ function RouteComponent() {
         ) : reports.length === 0 ? (
           <FullPageEmptyState title="No reports" />
         ) : (
-          <GrafanaGrid layouts={layouts}>
+          <DashboardGrid layout={layout}>
             {reports.map((report) => (
               <div key={report.id}>
                 <ReportItemReadOnly
-                  report={report}
-                  shareId={shareId}
-                  range={range}
-                  startDate={startDate}
                   endDate={endDate}
                   interval={interval}
+                  range={range}
+                  report={report}
+                  shareId={shareId}
+                  startDate={startDate}
                 />
               </div>
             ))}
-          </GrafanaGrid>
+          </DashboardGrid>
         )}
       </div>
     </div>

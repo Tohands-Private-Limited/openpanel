@@ -3,12 +3,15 @@
   "defaultOpen": true,
   "pages": [
     "[Get started](/docs/self-hosting/self-hosting)",
+    "v2",
     "[Deploy with Docker Compose](/docs/self-hosting/deploy-docker-compose)",
     "[Deploy with Coolify](/docs/self-hosting/deploy-coolify)",
     "[Deploy with Dokploy](/docs/self-hosting/deploy-dokploy)",
     "[Deploy on Kubernetes](/docs/self-hosting/deploy-kubernetes)",
     "[Reverse proxy setup](/docs/self-hosting/reverse-proxy)",
     "[Environment Variables](/docs/self-hosting/environment-variables)",
+    "[Social login (Google & GitHub)](/docs/self-hosting/social-login)",
+    "[Google Search Console](/docs/self-hosting/google-search-console)",
     "[High volume setup](/docs/self-hosting/high-volume)",
     "supporter-access-latest-docker-images",
     "changelog"
