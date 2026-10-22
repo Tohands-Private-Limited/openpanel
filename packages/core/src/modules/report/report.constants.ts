@@ -860,12 +860,39 @@ export const zRetentionOptions = z.object({
   criteria: zCriteria.optional(),
 });
 
+/** Dimensions the flow query cannot resolve: it reads `events` alone, with no profile, group or cohort join. */
+const JOIN_REQUIRING_PROPERTY_PREFIXES = ['profile.', 'group.', 'cohort:'];
+
+/** True for a top-level events column or a `properties.*` key. */
+export function isEventLevelProperty(property: string): boolean {
+  return !JOIN_REQUIRING_PROPERTY_PREFIXES.some((prefix) =>
+    property.startsWith(prefix)
+  );
+}
+
+/**
+ * Groups one event's Sankey nodes by one of its properties (e.g.
+ * `screen_view` by `path`) instead of by its name. Join-requiring dimensions
+ * are refused here, not only hidden in the UI, so a raw API call cannot push
+ * them into the flow query.
+ */
+export const zSankeyLabelRule = z.object({
+  event: z.string(),
+  property: z.string().refine(isEventLevelProperty, {
+    message:
+      'Sankey node labels only support event-level properties (top-level columns or properties.*), not profile/group/cohort dimensions',
+  }),
+});
+export type ISankeyLabelRule = z.infer<typeof zSankeyLabelRule>;
+
 export const zSankeyOptions = z.object({
   type: z.literal('sankey'),
   mode: z.enum(['between', 'after', 'before']),
   steps: z.number().min(2).max(10).default(5),
   exclude: z.array(z.string()).default([]),
   include: z.array(z.string()).optional(),
+  // Optional rather than defaulted so option literals that predate it still type-check; absent means [].
+  labelBy: z.array(zSankeyLabelRule).optional(),
 });
 
 export const zHistogramOptions = z.object({

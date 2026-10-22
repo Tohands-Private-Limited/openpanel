@@ -18,6 +18,7 @@ import {
   changeStacked,
   changeUnit,
 } from '../reportSlice';
+import { SankeyLabelBy } from './SankeyLabelBy';
 import { Combobox } from '@/components/ui/combobox';
 import { ComboboxEvents } from '@/components/ui/combobox-events';
 import { InputEnter } from '@/components/ui/input-enter';
@@ -77,6 +78,7 @@ export function ReportSettings() {
     if (chartType === 'sankey') {
       fields.push('sankeyMode');
       fields.push('sankeySteps');
+      fields.push('sankeyLabelBy');
       fields.push('sankeyExclude');
       fields.push('sankeyInclude');
     }
@@ -292,6 +294,16 @@ export function ReportSettings() {
               type="number"
               value={options?.steps ? String(options.steps) : '5'}
             />
+          </div>
+        )}
+        {fields.includes('sankeyLabelBy') && options?.type === 'sankey' && (
+          <div className="flex flex-col">
+            <Label className="whitespace-nowrap font-medium">Node label</Label>
+            <span className="mb-2 text-muted-foreground text-sm">
+              Group these events by a property instead of their name. Other
+              events use the event name.
+            </span>
+            <SankeyLabelBy value={options.labelBy ?? []} />
           </div>
         )}
         {fields.includes('sankeyExclude') && options?.type === 'sankey' && (

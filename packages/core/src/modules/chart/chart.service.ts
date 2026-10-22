@@ -529,6 +529,7 @@ export async function getSankeyChart(deps: ServiceDeps, input: IReportInput) {
     endEvent: eventSeries[1],
     exclude: options.exclude || [],
     include: options.include,
+    labelBy: options.labelBy ?? [],
     timezone,
   });
 }

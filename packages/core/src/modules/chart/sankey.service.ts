@@ -7,6 +7,7 @@ import {
   chartColors,
   type IChartEvent,
   type IChartEventFilter,
+  type ISankeyLabelRule,
 } from '../report/report.constants';
 import {
   DEFAULT_SANKEY_STEPS,
@@ -168,6 +169,7 @@ export async function getSankey(
     endEvent,
     exclude = [],
     include,
+    labelBy = [],
     timezone,
   }: IGetSankeyInput
 ): Promise<SankeyResult> {
@@ -182,6 +184,7 @@ export async function getSankey(
     endEvent: toSankeyEvent(endEvent, projectId),
     include,
     exclude,
+    labelBy,
   };
   const isBetween = mode === 'between' && !!startEvent && !!endEvent;
   const start = pathsInput.startEvent as SankeyEvent;
@@ -503,6 +506,7 @@ export async function getUserFlowCore(
     steps?: number;
     exclude?: string[];
     include?: string[];
+    labelBy?: ISankeyLabelRule[];
   }
 ) {
   if (input.mode === 'between' && !input.endEvent) {
@@ -520,6 +524,7 @@ export async function getUserFlowCore(
     endEvent: input.endEvent ? toChartEvent(input.endEvent) : undefined,
     exclude: input.exclude ?? [],
     include: input.include,
+    labelBy: input.labelBy ?? [],
     timezone,
   });
 

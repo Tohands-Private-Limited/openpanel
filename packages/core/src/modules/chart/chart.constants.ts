@@ -2,7 +2,7 @@
 // allow-lists shared by more than one file here.
 
 import { z } from 'zod';
-import { zChartEvent } from '../report/report.constants';
+import { zChartEvent, zSankeyLabelRule } from '../report/report.constants';
 
 /**
  * Window the REST retention routes (`/insights/:projectId/retention`,
@@ -50,6 +50,7 @@ export const zGetSankeyInput = z.object({
   endEvent: zChartEvent.optional(),
   exclude: z.array(z.string()).default([]),
   include: z.array(z.string()).optional(),
+  labelBy: z.array(zSankeyLabelRule).default([]),
 });
 
 export type IGetSankeyInput = z.infer<typeof zGetSankeyInput> & {

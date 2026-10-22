@@ -6,8 +6,10 @@
 // an open question.
 
 import { type SqlFragment, sql } from '@openpanel/db/src/clickhouse/sql';
+import type { ISankeyLabelRule } from '../../report/report.constants';
 import { compiledText } from './compiled';
 import { CHART_TABLE } from './field-resolution';
+import { type SankeyPathShape, sankeyLabelledPathShape } from './sankey-labels';
 
 export type SankeyMode = 'after' | 'before' | 'between';
 
@@ -62,6 +64,20 @@ export interface SankeyPathsInput {
   /** Compiled `name IN (...)` / `name NOT IN (...)` clause, if any. */
   include?: string[];
   exclude: string[];
+  labelBy?: ISankeyLabelRule[];
+}
+
+function pathShape(input: SankeyPathsInput): SankeyPathShape {
+  return (
+    sankeyLabelledPathShape(input.labelBy) ?? {
+      orderedEventColumns: compiledText('name as event_name'),
+      dedupeConsecutive: DEDUPE_CONSECUTIVE,
+      truncateAtRepeat: TRUNCATE_AT_REPEAT,
+      transitionPairs: TRANSITION_PAIRS,
+      anchorName: sql.empty,
+      labelOf: sql.empty,
+    }
+  );
 }
 
 function dateRange(input: SankeyPathsInput): SqlFragment {
@@ -106,6 +122,7 @@ interface ModeConfig {
 
 function modeConfig(input: SankeyPathsInput): ModeConfig {
   const { mode, startEvent, endEvent, steps } = input;
+  const { anchorName } = pathShape(input);
   const stepCount = sql.uint64(steps);
   const defaultSlice = sql`arraySlice(events_deduped, 1, ${stepCount})`;
   const inStartSessions = sql`session_id IN (SELECT session_id FROM start_event_sessions)`;
@@ -114,13 +131,13 @@ function modeConfig(input: SankeyPathsInput): ModeConfig {
     const name = sql.string(startEvent.name);
     return {
       sessionFilter: inStartSessions,
-      eventsSlice: sql`arraySlice(events_deduped, arrayFirstIndex(x -> x = ${name}, events_deduped), ${stepCount})`,
+      eventsSlice: sql`arraySlice(events_deduped, arrayFirstIndex(x -> x${anchorName} = ${name}, events_deduped), ${stepCount})`,
     };
   }
 
   if (mode === 'before' && startEvent) {
     const name = sql.string(startEvent.name);
-    const first = sql`arrayFirstIndex(x -> x = ${name}, events_deduped)`;
+    const first = sql`arrayFirstIndex(x -> x${anchorName} = ${name}, events_deduped)`;
     const from = sql`greatest(1, ${first} - ${stepCount} + 1)`;
     return {
       sessionFilter: inStartSessions,
@@ -138,7 +155,7 @@ function modeConfig(input: SankeyPathsInput): ModeConfig {
     const name = sql.string(startEvent.name);
     return {
       sessionFilter: sql`${inStartSessions} AND session_id IN (SELECT session_id FROM end_event_sessions)`,
-      eventsSlice: sql`arraySlice(events_deduped, arrayFirstIndex(x -> x = ${name}, events_deduped))`,
+      eventsSlice: sql`arraySlice(events_deduped, arrayFirstIndex(x -> x${anchorName} = ${name}, events_deduped))`,
     };
   }
 
@@ -166,10 +183,11 @@ export function sankeySessionPathsQuery(input: SankeyPathsInput): SqlFragment {
     anchorCtes.length > 0 ? sql`${sql.join(anchorCtes)}, ` : sql.empty;
 
   const having = sessionFilter ?? sql`1 = 1`;
+  const shape = pathShape(input);
   const eventsExpr =
-    input.mode === 'after' ? TRUNCATE_AT_REPEAT : sql`events_sliced`;
+    input.mode === 'after' ? shape.truncateAtRepeat : sql`events_sliced`;
 
-  return sql`WITH ${anchors}events_deduped_cte AS (WITH ordered_events AS (SELECT session_id, name as event_name, created_at FROM ${sql.id(CHART_TABLE.events)} WHERE ${dateRange(input)}${eventNameFilter(input)} ORDER BY session_id ASC, created_at ASC) SELECT session_id, ${DEDUPE_CONSECUTIVE} FROM ordered_events GROUP BY session_id), events_sliced_cte AS (SELECT session_id, ${eventsSlice} as events_sliced FROM events_deduped_cte HAVING ${having}) SELECT session_id, ${eventsExpr} as events, events[1] as entry_event FROM events_sliced_cte HAVING length(events) >= ${sql.uint64(MIN_PATH_LENGTH)}`;
+  return sql`WITH ${anchors}events_deduped_cte AS (WITH ordered_events AS (SELECT session_id, ${shape.orderedEventColumns}, created_at FROM ${sql.id(CHART_TABLE.events)} WHERE ${dateRange(input)}${eventNameFilter(input)} ORDER BY session_id ASC, created_at ASC) SELECT session_id, ${shape.dedupeConsecutive} FROM ordered_events GROUP BY session_id), events_sliced_cte AS (SELECT session_id, ${eventsSlice} as events_sliced FROM events_deduped_cte HAVING ${having}) SELECT session_id, ${eventsExpr} as events, events[1]${shape.labelOf} as entry_event FROM events_sliced_cte HAVING length(events) >= ${sql.uint64(MIN_PATH_LENGTH)}`;
 }
 
 /**
@@ -183,7 +201,8 @@ function betweenSessionsQuery(
 ): SqlFragment {
   const start = sql.string(startEvent.name);
   const end = sql.string(endEvent.name);
-  return sql`WITH session_paths AS (${sankeySessionPathsQuery(input)}) SELECT session_id, events, arrayFirstIndex(x -> x = ${start}, events) as start_index, arrayFirstIndex((x, i) -> x = ${end} AND i > start_index, events, arrayEnumerate(events)) as end_index FROM session_paths HAVING start_index > 0 AND end_index > 0 AND end_index - start_index < ${sql.uint64(input.steps)}`;
+  const { anchorName } = pathShape(input);
+  return sql`WITH session_paths AS (${sankeySessionPathsQuery(input)}) SELECT session_id, events, arrayFirstIndex(x -> x${anchorName} = ${start}, events) as start_index, arrayFirstIndex((x, i) -> x${anchorName} = ${end} AND i > start_index, events, arrayEnumerate(events)) as end_index FROM session_paths HAVING start_index > 0 AND end_index > 0 AND end_index - start_index < ${sql.uint64(input.steps)}`;
 }
 
 const BETWEEN_SLICE = compiledText(
@@ -195,12 +214,13 @@ function topEntriesFrom(sessionPaths: SqlFragment): SqlFragment {
 }
 
 function transitionsFrom(
+  shape: SankeyPathShape,
   baseCteName: string,
   baseQuery: SqlFragment,
   pathsSelect: SqlFragment,
   topEntryEvents: string[]
 ): SqlFragment {
-  return sql`WITH ${compiledText(baseCteName)} AS (${baseQuery}), session_paths AS (SELECT ${pathsSelect} FROM ${compiledText(baseCteName)} HAVING events[1] IN ${sql.array('String', topEntryEvents)}) SELECT pair.1 as source, pair.2 as target, pair.3 as step, count() as value FROM (${TRANSITION_PAIRS}) GROUP BY source, target, step ORDER BY step ASC, value DESC`;
+  return sql`WITH ${compiledText(baseCteName)} AS (${baseQuery}), session_paths AS (SELECT ${pathsSelect} FROM ${compiledText(baseCteName)} HAVING events[1]${shape.labelOf} IN ${sql.array('String', topEntryEvents)}) SELECT pair.1 as source, pair.2 as target, pair.3 as step, count() as value FROM (${shape.transitionPairs}) GROUP BY source, target, step ORDER BY step ASC, value DESC`;
 }
 
 /** `after` / `before` modes: top entry events straight off the session paths. */
@@ -213,6 +233,7 @@ export function sankeyTransitionsQuery(
   topEntryEvents: string[]
 ): SqlFragment {
   return transitionsFrom(
+    pathShape(input),
     'session_paths_base',
     sankeySessionPathsQuery(input),
     sql`session_id, events`,
@@ -226,7 +247,7 @@ export function sankeyBetweenTopEntriesQuery(
   startEvent: SankeyEvent,
   endEvent: SankeyEvent
 ): SqlFragment {
-  const betweenPaths = sql`WITH between_sessions AS (${betweenSessionsQuery(input, startEvent, endEvent)}) SELECT session_id, ${BETWEEN_SLICE} as events, events[start_index] as entry_event FROM between_sessions`;
+  const betweenPaths = sql`WITH between_sessions AS (${betweenSessionsQuery(input, startEvent, endEvent)}) SELECT session_id, ${BETWEEN_SLICE} as events, events[start_index]${pathShape(input).labelOf} as entry_event FROM between_sessions`;
   return topEntriesFrom(betweenPaths);
 }
 
@@ -237,6 +258,7 @@ export function sankeyBetweenTransitionsQuery(
   topEntryEvents: string[]
 ): SqlFragment {
   return transitionsFrom(
+    pathShape(input),
     'between_sessions',
     betweenSessionsQuery(input, startEvent, endEvent),
     sql`session_id, ${BETWEEN_SLICE} as events`,

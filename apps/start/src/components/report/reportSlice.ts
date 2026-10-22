@@ -10,6 +10,7 @@ import type {
   IInterval,
   IReport,
   IReportOptions,
+  ISankeyLabelRule,
   zCriteria,
 } from '@openpanel/core/modules/report/report.constants';
 import {
@@ -70,6 +71,13 @@ function clearStaleBreakdownSteps(state: InitialState) {
     }
   }
 }
+
+// Default node-label rule seeded onto freshly created Sankey reports: relabel
+// `screen_view` by its `path` so the flow renders per-screen nodes out of the
+// box. A factory so each call returns a fresh array Immer can freeze.
+export const createDefaultSankeyLabelBy = (): ISankeyLabelRule[] => [
+  { event: 'screen_view', property: 'path' },
+];
 
 export const reportSlice = createSlice({
   name: 'report',
@@ -238,6 +246,7 @@ export const reportSlice = createSlice({
           mode: 'after',
           steps: 5,
           exclude: [],
+          labelBy: createDefaultSankeyLabelBy(),
         };
       }
 
@@ -384,6 +393,7 @@ export const reportSlice = createSlice({
           mode: action.payload,
           steps: 5,
           exclude: [],
+          labelBy: createDefaultSankeyLabelBy(),
         };
       } else if (state.options.type === 'sankey') {
         state.options.mode = action.payload;
@@ -397,6 +407,7 @@ export const reportSlice = createSlice({
           mode: 'after',
           steps: action.payload,
           exclude: [],
+          labelBy: createDefaultSankeyLabelBy(),
         };
       } else if (state.options.type === 'sankey') {
         state.options.steps = action.payload;
@@ -410,6 +421,7 @@ export const reportSlice = createSlice({
           mode: 'after',
           steps: 5,
           exclude: action.payload,
+          labelBy: createDefaultSankeyLabelBy(),
         };
       } else if (state.options.type === 'sankey') {
         state.options.exclude = action.payload;
@@ -424,9 +436,24 @@ export const reportSlice = createSlice({
           steps: 5,
           exclude: [],
           include: action.payload,
+          labelBy: createDefaultSankeyLabelBy(),
         };
       } else if (state.options.type === 'sankey') {
         state.options.include = action.payload;
+      }
+    },
+    changeSankeyLabelBy(state, action: PayloadAction<ISankeyLabelRule[]>) {
+      state.dirty = true;
+      if (!state.options) {
+        state.options = {
+          type: 'sankey',
+          mode: 'after',
+          steps: 5,
+          exclude: [],
+          labelBy: action.payload,
+        };
+      } else if (state.options.type === 'sankey') {
+        state.options.labelBy = action.payload;
       }
     },
     changeStacked(state, action: PayloadAction<boolean>) {
@@ -493,6 +520,7 @@ export const {
   changeSankeySteps,
   changeSankeyExclude,
   changeSankeyInclude,
+  changeSankeyLabelBy,
   changeStacked,
   reorderEvents,
   changeVisibleSeries,

@@ -1,8 +1,11 @@
 import type { IReport } from '@openpanel/core/modules/report/report.constants';
 import { describe, expect, test } from 'vitest';
 import reducer, {
+  changeChartType,
   changeConversionYAxisScale,
   changeFunnelWindow,
+  changeSankeyLabelBy,
+  changeSankeySteps,
   removeEvent,
   setReport,
 } from './reportSlice';
@@ -64,5 +67,62 @@ describe('conversion y-axis scale', () => {
     expect(
       state.options?.type === 'funnel' ? state.options.yAxisScale : 'wrong'
     ).toBeUndefined();
+  });
+});
+
+describe('sankey label-by', () => {
+  const defaultRule = { event: 'screen_view', property: 'path' };
+
+  test('seeds screen_view -> path when switching a report to sankey', () => {
+    const state = reducer(undefined, changeChartType('sankey'));
+    expect(
+      state.options?.type === 'sankey' ? state.options.labelBy : 'wrong'
+    ).toEqual([defaultRule]);
+  });
+
+  test('seeds the default when another sankey reducer creates the options', () => {
+    const state = reducer(undefined, changeSankeySteps(3));
+    expect(
+      state.options?.type === 'sankey' ? state.options.labelBy : 'wrong'
+    ).toEqual([defaultRule]);
+  });
+
+  test('does not share the seeded array between reports', () => {
+    const a = reducer(undefined, changeChartType('sankey'));
+    const b = reducer(undefined, changeChartType('sankey'));
+    const rulesA = a.options?.type === 'sankey' ? a.options.labelBy : undefined;
+    const rulesB = b.options?.type === 'sankey' ? b.options.labelBy : undefined;
+    expect(rulesA).not.toBe(rulesB);
+  });
+
+  test('changeSankeyLabelBy replaces the rules and marks the report dirty', () => {
+    const seeded = reducer(undefined, changeChartType('sankey'));
+    const state = reducer(
+      { ...seeded, dirty: false },
+      changeSankeyLabelBy([{ event: 'click', property: 'target' }])
+    );
+    expect(state.dirty).toBe(true);
+    expect(
+      state.options?.type === 'sankey' ? state.options.labelBy : 'wrong'
+    ).toEqual([{ event: 'click', property: 'target' }]);
+  });
+
+  test('changeSankeyLabelBy can clear all rules', () => {
+    const seeded = reducer(undefined, changeChartType('sankey'));
+    const state = reducer(seeded, changeSankeyLabelBy([]));
+    expect(
+      state.options?.type === 'sankey' ? state.options.labelBy : 'wrong'
+    ).toEqual([]);
+  });
+
+  test('changeSankeyLabelBy creates sankey options when none exist', () => {
+    const state = reducer(
+      undefined,
+      changeSankeyLabelBy([{ event: 'a', property: 'path' }])
+    );
+    expect(state.options).toMatchObject({
+      type: 'sankey',
+      labelBy: [{ event: 'a', property: 'path' }],
+    });
   });
 });
