@@ -47,6 +47,10 @@ fork:
   `-<short sha>`.
 - Upstream's settle, version and self-hosting CLI jobs are removed.
 
+Upstream's `.github/workflows/self-hosting-release.yml` is deleted. It
+publishes upstream's Docker Hub images and GitHub releases when the
+`self-hosting` tag moves, which never applies to the fork.
+
 The api image runs both roles (`ROLE=api|worker|all`). There is no separate
 worker image anymore.
 
