@@ -7,6 +7,7 @@
 
 import { beforeAll, describe, expect, it } from 'bun:test';
 import type { SqlFragment } from '@openpanel/db/src/clickhouse/sql';
+import { bootstrapTestDatabases } from '../../../../../../test/bootstrap-databases';
 
 const PROJECT_ID = 'retention-sql-validation';
 
@@ -19,6 +20,9 @@ async function explain(fragment: SqlFragment): Promise<void> {
 }
 
 beforeAll(async () => {
+  // FORK (ToHands): the file may be the first to touch ClickHouse in its
+  // shard; the fork's extra test files changed how the shards split.
+  await bootstrapTestDatabases();
   ({ ch } = await import('@openpanel/db/src/clickhouse/client'));
   RET = await import('./retention.sql');
 });
