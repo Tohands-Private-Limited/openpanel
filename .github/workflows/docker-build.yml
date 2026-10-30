@@ -182,17 +182,12 @@ jobs:
         app: [api, dashboard]
         platform: [linux/amd64, linux/arm64]
         include:
-          # dev_shape: the office runner the amd64 leg uses on develop.
           - app: api
             dockerfile: apps/api/Dockerfile
             build_args: DATABASE_URL=postgresql://dummy:dummy@localhost:5432/dummy
-            dev_shape: linux-x64-2vcpu-2gb
           - app: dashboard
             dockerfile: apps/start/Dockerfile
-            dev_shape: linux-x64-4vcpu-16gb
-    # develop (dev) builds its amd64 legs on the office runners; staging and main
-    # stay on GitHub-hosted runners, and so does the arm64 leg.
-    runs-on: ${{ matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || (github.ref == 'refs/heads/develop' && matrix.dev_shape || 'ubuntu-latest') }}
+    runs-on: ${{ matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - name: Prepare platform pair
