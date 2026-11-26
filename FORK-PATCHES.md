@@ -172,6 +172,22 @@ fork's change is the retry budget, plus treating 408 as retryable:
 - Tests: `jobs.registry.test.ts` (pinned defaults), `provider-error.test.ts`,
   and `clients/integrations/fetcher.test.ts`.
 
+### Configurable dashboard (tRPC) deadline
+
+Upstream stops every tRPC call at a fixed 30 s (`RPC_DEADLINE_MS` in
+`packages/core/src/rpc/deadline.ts`). Heavy 30-day reports on tohands-prod
+need longer, so the fork reads it from the environment:
+
+- `apps/api/src/config/env.ts`: `RPC_DEADLINE_MS`, default 30000, at most
+  50000. The cap keeps the HTTP idle timeout (deadline + 10 s) within the
+  60 s ALB idle timeout, so users get the deadline's explained error and not
+  a bare 504.
+- `apps/api/src/main.ts`: passes it to `createTrpcFetchHandler` and derives
+  `idleTimeout` from it.
+- ClickHouse's `CLICKHOUSE_REQUEST_TIMEOUT_MS` (default 30000) must be raised
+  with it, or queries still stop at 30 s.
+- Tests: `apps/api/src/config/env.test.ts`.
+
 ## Temporary patches
 
 ### Deprecated `POST /track/batch` route

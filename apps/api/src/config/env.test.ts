@@ -456,6 +456,16 @@ describe('cross-field invariants, checked before the transform', () => {
     ).toThrow();
   });
 
+  // FORK (ToHands)
+  it('reads RPC_DEADLINE_MS, defaulting to 30000 and refusing more than 50000', () => {
+    expect(loadConfig(base).RPC_DEADLINE_MS).toBe(30_000);
+    expect(
+      loadConfig({ ...base, RPC_DEADLINE_MS: '50000' }).RPC_DEADLINE_MS
+    ).toBe(50_000);
+    expect(() => loadConfig({ ...base, RPC_DEADLINE_MS: '60000' })).toThrow();
+    expect(() => loadConfig({ ...base, RPC_DEADLINE_MS: 'soon' })).toThrow();
+  });
+
   it('refuses a reaper deadman below the session idle window', () => {
     expect(() =>
       loadConfig({
