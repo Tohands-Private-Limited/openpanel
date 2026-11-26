@@ -44,7 +44,6 @@ import {
   type QueueProducerHandle,
   queueKey,
   queues,
-  RPC_DEADLINE_MS,
   rawStderrWrite,
   registerBufferMetrics,
   registerDefaultMetrics,
@@ -92,8 +91,10 @@ const MS_PER_SECOND = 1000;
 // the ~1.6 s event-loop stall measured at the end of a large drill-down plus
 // Bun's up-to-1 s timer granularity.
 const HTTP_IDLE_TIMEOUT_MARGIN_SECONDS = 10;
-const HTTP_IDLE_TIMEOUT_SECONDS =
-  RPC_DEADLINE_MS / MS_PER_SECOND + HTTP_IDLE_TIMEOUT_MARGIN_SECONDS;
+// FORK (ToHands): the deadline comes from `RPC_DEADLINE_MS` config, not a constant.
+function httpIdleTimeoutSeconds(rpcDeadlineMs: number): number {
+  return rpcDeadlineMs / MS_PER_SECOND + HTTP_IDLE_TIMEOUT_MARGIN_SECONDS;
+}
 
 function loadConfigOrExit(): Config {
   try {
@@ -351,6 +352,7 @@ async function buildHttpApp(deps: AppDeps) {
       simulateLatency: !config.core.isProduction,
       signCookie,
       demoMode: Boolean(config.core.demoUserId),
+      deadlineMs: config.RPC_DEADLINE_MS,
     });
 
     app
@@ -448,7 +450,7 @@ async function main() {
   setBooting(true);
   const listenOptions = {
     ...config.listen,
-    idleTimeout: HTTP_IDLE_TIMEOUT_SECONDS,
+    idleTimeout: httpIdleTimeoutSeconds(config.RPC_DEADLINE_MS),
   };
   app.listen(listenOptions, () => {
     logger.info(
