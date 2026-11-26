@@ -8,7 +8,11 @@ import type {
   DevLoginConfig,
   KafkaSaslMechanism,
 } from '@openpanel/core';
-import { KAFKA_SASL_MECHANISMS, queues } from '@openpanel/core';
+import {
+  KAFKA_SASL_MECHANISMS,
+  queues,
+  RPC_DEADLINE_MS,
+} from '@openpanel/core';
 import { z } from 'zod';
 
 export const ROLE_VALUES = ['api', 'worker', 'all'] as const;
@@ -26,6 +30,11 @@ const DEFAULT_SERVICE_ENVIRONMENT = 'dev';
 const DEFAULT_SHUTDOWN_FORCE_EXIT_MS = 20_000;
 /** Matches `packages/redis`'s own default, so leaving the variable unset changes nothing. */
 const DEFAULT_REDIS_CACHE_COMMAND_TIMEOUT_MS = 5000;
+/**
+ * FORK (ToHands): keeps the HTTP idle timeout (deadline + 10 s) within the 60 s
+ * load-balancer idle timeout, so the deadline's explained error beats a bare 504.
+ */
+const MAX_RPC_DEADLINE_MS = 50_000;
 
 const DEFAULT_KAFKA_CLIENT_ID = 'openpanel';
 const DEFAULT_KAFKA_EVENTS_TOPIC = 'events';
@@ -379,6 +388,16 @@ const rawSchema = z.object({
   ),
   REDIS_CACHE_COMMAND_TIMEOUT_MS: positiveIntWithDefault(
     DEFAULT_REDIS_CACHE_COMMAND_TIMEOUT_MS
+  ),
+  // FORK (ToHands): dashboard (tRPC) deadline; ClickHouse's request timeout must not be shorter.
+  RPC_DEADLINE_MS: z.preprocess(
+    blankToUndefined,
+    z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(MAX_RPC_DEADLINE_MS)
+      .default(RPC_DEADLINE_MS)
   ),
 
   /**
@@ -972,6 +991,8 @@ export interface Config {
   SHUTDOWN_FORCE_EXIT_MS: number;
   /** Sits here, not in `core`: the cache client is `packages/redis`'s singleton, configured once at boot. */
   REDIS_CACHE_COMMAND_TIMEOUT_MS: number;
+  /** FORK (ToHands): the tRPC deadline; the HTTP idle timeout is derived from it. */
+  RPC_DEADLINE_MS: number;
   /** Sits here, not in `core.kafka`: `apps/api` picks the dead-letter sink and core only gets the `sendToDeadLetter` seam. */
   INGEST_DEAD_LETTER_MAX_ENTRIES: number;
   /** Sits here, not in `core.kafka`: the marker is keyed on the event, not a Kafka coordinate. */
@@ -1019,6 +1040,7 @@ const envSchema = rawSchema
       COOKIE_SECRET: raw.COOKIE_SECRET,
       SHUTDOWN_FORCE_EXIT_MS: raw.SHUTDOWN_FORCE_EXIT_MS,
       REDIS_CACHE_COMMAND_TIMEOUT_MS: raw.REDIS_CACHE_COMMAND_TIMEOUT_MS,
+      RPC_DEADLINE_MS: raw.RPC_DEADLINE_MS,
       INGEST_DEAD_LETTER_MAX_ENTRIES: raw.INGEST_DEAD_LETTER_MAX_ENTRIES,
       dashboardOrigins: [
         dashboardUrl,
